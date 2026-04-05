@@ -14,6 +14,7 @@
 extern "C" {
 #include "resource.h"
 #include "parser.h"
+#include "util.h"
 }
 
 struct ColorSeg {
@@ -31,13 +32,13 @@ static char s_path[MAX_PATH * 2] = "";
 static bool s_remove_ts = false;
 
 static std::vector<ChatLine> s_chat;
-static int s_total_chars = 0;
+static size_t s_total_chars = 0;
 
 static bool s_show_filter = false;
 static char s_kw_buf[4096] = "";
 static bool s_use_regex = false;
 static std::vector<int> s_flt_indices;
-static int s_flt_chars = 0;
+static size_t s_flt_chars = 0;
 static std::string s_regex_error;
 
 static bool s_open_backup = false;
@@ -66,33 +67,38 @@ static ImVec4 color_palette(int code) {
 
 static std::vector<ColorSeg> parse_segments(const char *raw) {
         std::vector<ColorSeg> segs;
+        segs.reserve(8);
         ImVec4 color(1.0f, 1.0f, 1.0f, 1.0f);
         std::string cur;
+        cur.reserve(128);
         for (int i = 0; raw[i]; i++) {
                 if (raw[i] == '^' && raw[i + 1]) {
                         char nx = raw[i + 1];
                         if (nx == '#') {
-                                if (!cur.empty()) { segs.push_back({cur, color}); cur.clear(); }
-                                char hex[7] = {};
                                 int k = i + 2, h = 0;
-                                while (raw[k] && h < 6 && isxdigit((unsigned char)raw[k]))
-                                        hex[h++] = raw[k++];
+                                while (raw[k] && h < 6 && isxdigit((unsigned char)raw[k])) {
+                                        h++; k++;
+                                }
                                 if (h == 6) {
+                                        if (!cur.empty()) { segs.push_back({std::move(cur), color}); cur.reserve(128); }
+                                        char hex[7];
+                                        memcpy(hex, raw + i + 2, 6);
+                                        hex[6] = '\0';
                                         unsigned v;
                                         sscanf(hex, "%x", &v);
                                         color = ImVec4(((v >> 16) & 0xFF) / 255.0f, ((v >> 8) & 0xFF) / 255.0f, (v & 0xFF) / 255.0f, 1.0f);
+                                        i = k - 1;
+                                        continue;
                                 }
-                                i = k - 1;
-                                continue;
                         }
                         if (nx >= '0' && nx <= '9') {
-                                if (!cur.empty()) { segs.push_back({cur, color}); cur.clear(); }
+                                if (!cur.empty()) { segs.push_back({std::move(cur), color}); cur.reserve(128); }
                                 color = color_palette(nx - '0');
                                 i++;
                                 continue;
                         }
                         if (nx == 'r' || nx == '~') {
-                                if (!cur.empty()) { segs.push_back({cur, color}); cur.clear(); }
+                                if (!cur.empty()) { segs.push_back({std::move(cur), color}); cur.reserve(128); }
                                 color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
                                 i++;
                                 continue;
@@ -114,7 +120,7 @@ static std::vector<ColorSeg> parse_segments(const char *raw) {
                 cur += raw[i];
         }
         if (!cur.empty())
-                segs.push_back({cur, color});
+                segs.push_back({std::move(cur), color});
         return segs;
 }
 
@@ -136,6 +142,7 @@ static void render_chat_line(const ChatLine &line) {
 
 static std::string build_plain(const std::vector<ChatLine> &lines) {
         std::string out;
+        out.reserve(s_total_chars);
         for (auto &l : lines) {
                 if (!l.timestamp.empty()) { out += l.timestamp; out += ' '; }
                 out += l.plain;
@@ -146,6 +153,7 @@ static std::string build_plain(const std::vector<ChatLine> &lines) {
 
 static std::string build_plain_indices(const std::vector<int> &indices) {
         std::string out;
+        out.reserve(s_flt_chars);
         for (int idx : indices) {
                 auto &l = s_chat[idx];
                 if (!l.timestamp.empty()) { out += l.timestamp; out += ' '; }
@@ -155,26 +163,20 @@ static std::string build_plain_indices(const std::vector<int> &indices) {
         return out;
 }
 
-static const char *stristr(const char *h, const char *n) {
-        if (!*n) return h;
-        for (; *h; h++) {
-                const char *a = h, *b = n;
-                while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
-                        a++; b++;
-                }
-                if (!*b) return h;
-        }
-        return NULL;
-}
-
 static bool match_line(const char *text, const std::string &kw, bool use_regex, const std::regex *pat) {
-        if (use_regex)
-                return std::regex_search(text, *pat);
+        if (use_regex) {
+                try {
+                        return std::regex_search(text, *pat);
+                } catch (...) {
+                        return false;
+                }
+        }
         return stristr(text, kw.c_str()) != NULL;
 }
 
 static void apply_filter(void) {
         s_flt_indices.clear();
+        s_flt_indices.reserve(s_chat.size());
         s_flt_chars = 0;
         s_regex_error.clear();
         if (s_chat.empty())
@@ -209,6 +211,10 @@ static void apply_filter(void) {
                 if (s_use_regex) {
                         auto compile = [&](const std::vector<std::string> &src, std::vector<std::regex> &dst) -> bool {
                                 for (auto &kw : src) {
+                                        if (kw.size() > 256) {
+                                                s_regex_error = "Regex too long (max 256 chars): " + kw.substr(0, 32) + "...";
+                                                return false;
+                                        }
                                         try {
                                                 dst.push_back(std::regex(kw, std::regex::icase));
                                         } catch (std::regex_error &) {
@@ -253,7 +259,7 @@ static void apply_filter(void) {
                 }
         }
         for (int idx : s_flt_indices)
-                s_flt_chars += (int)s_chat[idx].plain.size() + (int)s_chat[idx].timestamp.size() + 3;
+                s_flt_chars += s_chat[idx].plain.size() + s_chat[idx].timestamp.size() + 3;
 }
 
 static void do_find_latest(GLFWwindow *w) {
@@ -267,7 +273,7 @@ static void do_find_latest(GLFWwindow *w) {
 
 static void do_browse(GLFWwindow *w) {
         char initdir[MAX_PATH + 32] = "";
-        get_fivem_logs_dir(initdir, sizeof(initdir));
+        get_logs_dir(initdir, sizeof(initdir));
         OPENFILENAMEA ofn = {};
         char fname[MAX_PATH] = "";
         ofn.lStructSize = sizeof(ofn);
@@ -293,6 +299,9 @@ static void do_parse(GLFWwindow *w) {
                 return;
         }
         s_chat.clear();
+        s_flt_indices.clear();
+        s_flt_chars = 0;
+        s_chat.reserve((size_t)log->count);
         s_total_chars = 0;
         for (int i = 0; i < log->count; i++) {
                 ChatEntry *e = &log->entries[i];
@@ -300,7 +309,7 @@ static void do_parse(GLFWwindow *w) {
                 cl.timestamp = e->timestamp;
                 cl.plain = e->plain;
                 cl.segments = parse_segments(e->raw);
-                s_total_chars += (int)strlen(e->plain) + (int)strlen(e->timestamp) + 3;
+                s_total_chars += strlen(e->plain) + strlen(e->timestamp) + 3;
                 s_chat.push_back(std::move(cl));
         }
         chatlog_free(log);
@@ -384,7 +393,9 @@ void ui_render(GLFWwindow *w) {
         ImGui::Text("Log File:");
         ImGui::SameLine();
         float avail = ImGui::GetContentRegionAvail().x;
-        ImGui::SetNextItemWidth(avail - 170);
+        float browse_w = 75, find_w = 85;
+        float path_offset = browse_w + find_w + ImGui::GetStyle().ItemSpacing.x * 2;
+        ImGui::SetNextItemWidth(avail - path_offset);
         ImGui::InputText("##path", s_path, sizeof(s_path));
         ImGui::SameLine();
         if (ImGui::Button("Browse", ImVec2(75, 0)))
@@ -403,7 +414,7 @@ void ui_render(GLFWwindow *w) {
                 }
         }
         ImGui::EndChild();
-        ImGui::Text("%d characters  |  %d messages", s_total_chars, (int)s_chat.size());
+        ImGui::Text("%u characters  |  %u messages", (unsigned)s_total_chars, (unsigned)s_chat.size());
         ImGui::Checkbox("Remove timestamps", &s_remove_ts);
         ImGui::SameLine();
         float bw = 72;
@@ -510,7 +521,7 @@ void ui_render(GLFWwindow *w) {
                                 }
                         }
                         ImGui::EndChild();
-                        ImGui::Text("%d characters and %d lines", s_flt_chars, (int)s_flt_indices.size());
+                        ImGui::Text("%u characters and %u lines", (unsigned)s_flt_chars, (unsigned)s_flt_indices.size());
                         ImGui::SameLine();
                         float fw = 90;
                         float fsp = ImGui::GetStyle().ItemSpacing.x;

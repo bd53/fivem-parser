@@ -1,5 +1,6 @@
 #include "resource.h"
 #include "parser.h"
+#include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,7 +8,7 @@
 
 static int g_was_running = 0;
 
-static int is_fivem_running(void) {
+static int is_app_running(void) {
         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snap == INVALID_HANDLE_VALUE)
                 return 0;
@@ -24,21 +25,6 @@ static int is_fivem_running(void) {
         }
         CloseHandle(snap);
         return found;
-}
-
-static void ensure_directory(const char *path) {
-        char tmp[MAX_PATH];
-        strncpy(tmp, path, MAX_PATH - 1);
-        tmp[MAX_PATH - 1] = '\0';
-        for (char *p = tmp + 3; *p; p++) {
-                if (*p == '\\' || *p == '/') {
-                        char saved = *p;
-                        *p = '\0';
-                        CreateDirectoryA(tmp, NULL);
-                        *p = saved;
-                }
-        }
-        CreateDirectoryA(tmp, NULL);
 }
 
 static void do_backup_save(void) {
@@ -62,11 +48,19 @@ static void do_backup_save(void) {
                 free(parsed);
                 return;
         }
-        char dir[MAX_PATH + 64];
-        snprintf(dir, sizeof(dir), "%s\\%04u\\%s", g_config.backup_path, (unsigned)st.wYear, months[st.wMonth - 1]);
+        char dir[MAX_PATH * 2];
+        int dlen = snprintf(dir, sizeof(dir), "%s\\%04u\\%s", g_config.backup_path, (unsigned)st.wYear, months[st.wMonth - 1]);
+        if (dlen < 0 || (size_t)dlen >= sizeof(dir)) {
+                free(parsed);
+                return;
+        }
         ensure_directory(dir);
-        char filepath[MAX_PATH + 128];
-        snprintf(filepath, sizeof(filepath), "%s\\%02u.%s.%04u-%02u.%02u.%02u.txt", dir, (unsigned)st.wDay, months[st.wMonth - 1], (unsigned)st.wYear, (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond);
+        char filepath[MAX_PATH * 2];
+        int flen = snprintf(filepath, sizeof(filepath), "%s\\%02u.%s.%04u-%02u.%02u.%02u.txt", dir, (unsigned)st.wDay, months[st.wMonth - 1], (unsigned)st.wYear, (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond);
+        if (flen < 0 || (size_t)flen >= sizeof(filepath)) {
+                free(parsed);
+                return;
+        }
         FILE *f = fopen(filepath, "wb");
         if (f) {
                 fwrite(parsed, 1, strlen(parsed), f);
@@ -78,7 +72,7 @@ static void do_backup_save(void) {
 void backup_on_timer(void) {
         if (!g_config.backup_enabled)
                 return;
-        int running = is_fivem_running();
+        int running = is_app_running();
         if (g_was_running && !running)
                 do_backup_save();
         g_was_running = running;
@@ -87,7 +81,7 @@ void backup_on_timer(void) {
 void backup_on_interval(void) {
         if (!g_config.interval_enabled)
                 return;
-        if (!is_fivem_running())
+        if (!is_app_running())
                 return;
         do_backup_save();
 }

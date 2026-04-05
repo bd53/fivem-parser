@@ -7,13 +7,17 @@ Config g_config;
 
 static void get_ini_path(char *out, int size) {
         GetModuleFileNameA(NULL, out, size);
+        out[size - 1] = '\0';
         char *last = strrchr(out, '\\');
         if (last) {
                 *(last + 1) = '\0';
         } else {
                 out[0] = '\0';
         }
-        strncat(out, "config.ini", (size_t)(size - (int)strlen(out) - 1));
+        int used = (int)strlen(out);
+        int remaining = size - used - 1;
+        if (remaining > 0)
+                strncat(out, "config.ini", (size_t)remaining);
 }
 
 void config_load(void) {

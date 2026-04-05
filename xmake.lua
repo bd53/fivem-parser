@@ -1,5 +1,5 @@
 set_project("fivem-parser")
-set_version("1.0.1")
+set_version("1.0.2")
 
 set_plat("mingw")
 set_arch("x86_64")
@@ -14,7 +14,7 @@ if is_mode("debug") then
         set_optimize("none")
         set_symbols("debug")
 else
-        set_optimize("faster")
+        set_optimize("fastest")
         set_strip("all")
 end
 

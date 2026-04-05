@@ -20,6 +20,9 @@ bool ui_get_remove_timestamps(void);
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
         (void)hInst; (void)hPrev; (void)cmd; (void)nShow;
         HANDLE mutex = CreateMutexA(NULL, TRUE, MUTEX_NAME);
+        if (!mutex) {
+                return 1;
+        }
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
                 MessageBoxA(NULL, "fivem-parser is already running.", APP_TITLE, MB_ICONINFORMATION);
                 CloseHandle(mutex);
@@ -53,14 +56,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
         double last_backup = glfwGetTime();
         double last_interval = glfwGetTime();
         while (!glfwWindowShouldClose(window)) {
-                glfwPollEvents();
+                glfwWaitEventsTimeout(0.5);
                 double now = glfwGetTime();
                 if (now - last_backup >= 10.0) {
                         backup_on_timer();
                         last_backup = now;
                 }
-                if (g_config.interval_enabled && g_config.interval_minutes > 0 &&
-                    now - last_interval >= g_config.interval_minutes * 60.0) {
+                if (g_config.interval_enabled && g_config.interval_minutes > 0 && now - last_interval >= g_config.interval_minutes * 60.0) {
                         backup_on_interval();
                         last_interval = now;
                 }

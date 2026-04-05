@@ -19,11 +19,7 @@ extern Config g_config;
 void config_load(void);
 void config_save(void);
 
-void strip_color_codes(char *s);
-int rtrim_newline(char *s);
 char *parse_log_file(const char *path, int remove_timestamps);
-int find_latest_log(char *out, int out_size);
-void get_fivem_logs_dir(char *out, int out_size);
 
 typedef struct {
         char timestamp[64];
