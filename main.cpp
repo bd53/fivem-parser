@@ -21,14 +21,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
         (void)hInst; (void)hPrev; (void)cmd; (void)nShow;
         HANDLE mutex = CreateMutexA(NULL, TRUE, MUTEX_NAME);
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-                MessageBoxA(NULL, "Chat Parser is already running.",
-                        APP_TITLE, MB_ICONINFORMATION);
+                MessageBoxA(NULL, "Chat Parser is already running.", APP_TITLE, MB_ICONINFORMATION);
                 CloseHandle(mutex);
                 return 1;
         }
         if (!glfwInit()) {
-                MessageBoxA(NULL, "Failed to initialize GLFW.",
-                        APP_TITLE, MB_ICONERROR);
+                MessageBoxA(NULL, "Failed to initialize GLFW.", APP_TITLE, MB_ICONERROR);
                 CloseHandle(mutex);
                 return 1;
         }

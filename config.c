@@ -8,8 +8,11 @@ Config g_config;
 static void get_ini_path(char *out, int size) {
         GetModuleFileNameA(NULL, out, size);
         char *last = strrchr(out, '\\');
-        if (last)
+        if (last) {
                 *(last + 1) = '\0';
+        } else {
+                out[0] = '\0';
+        }
         strncat(out, "config.ini", (size_t)(size - (int)strlen(out) - 1));
 }
 

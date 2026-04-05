@@ -14,7 +14,7 @@ extern "C" {
 #include "parser.h"
 }
 
-static char s_path[MAX_PATH] = "";
+static char s_path[MAX_PATH * 2] = "";
 static std::string s_output;
 static bool s_remove_ts = false;
 static int s_chars = 0, s_lines = 0;
@@ -44,8 +44,7 @@ static const char *stristr(const char *h, const char *n) {
         if (!*n) return h;
         for (; *h; h++) {
                 const char *a = h, *b = n;
-                while (*a && *b &&
-                       tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+                while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
                         a++; b++;
                 }
                 if (!*b) return h;
@@ -56,7 +55,7 @@ static const char *stristr(const char *h, const char *n) {
 static void do_find_latest(GLFWwindow *w) {
         char path[MAX_PATH * 2];
         if (!find_latest_log(path, sizeof(path))) {
-                MessageBoxA(glfwGetWin32Window(w), "No FiveM session logs found.\n\n" "Expected location:\n" "  %LOCALAPPDATA%\\FiveM\\FiveM.app\\logs\\\n\n" "Launch FiveM and join a server first.", "No Logs Found", MB_ICONWARNING);
+                MessageBoxA(glfwGetWin32Window(w), "No session found.\n\n" "Expected location:\n" "  %LOCALAPPDATA%\\FiveM\\FiveM.app\\logs\\\n\n" "Launch FiveM and join a server first.", "Error", MB_ICONWARNING);
                 return;
         }
         snprintf(s_path, sizeof(s_path), "%s", path);
@@ -69,11 +68,11 @@ static void do_browse(GLFWwindow *w) {
         char fname[MAX_PATH] = "";
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner = glfwGetWin32Window(w);
-        ofn.lpstrFilter = "FiveM Session Logs\0CitizenFX_log_*.log\0" "All Log Files\0*.log\0" "All Files\0*.*\0";
+        ofn.lpstrFilter = "Session\0CitizenFX_log_*.log\0" "All Log Files\0*.log\0" "All Files\0*.*\0";
         ofn.lpstrFile = fname;
         ofn.nMaxFile = MAX_PATH;
         ofn.Flags = OFN_FILEMUSTEXIST;
-        ofn.lpstrTitle = "Select a FiveM Session Log";
+        ofn.lpstrTitle = "Select Session";
         ofn.lpstrInitialDir = initdir[0] ? initdir : NULL;
         if (GetOpenFileNameA(&ofn))
                 snprintf(s_path, sizeof(s_path), "%s", fname);
@@ -81,7 +80,7 @@ static void do_browse(GLFWwindow *w) {
 
 static void do_parse(GLFWwindow *w) {
         if (!s_path[0]) {
-                MessageBoxA(glfwGetWin32Window(w), "Please select or auto-detect a log file first.", "No file", MB_ICONWARNING);
+                MessageBoxA(glfwGetWin32Window(w), "Please select or auto-detect a log file first.", "Error", MB_ICONWARNING);
                 return;
         }
         char *result = parse_log_file(s_path, s_remove_ts ? 1 : 0);
@@ -143,11 +142,12 @@ static void apply_filter(void) {
         tmp[sizeof(tmp) - 1] = '\0';
         const char *kw_list[256];
         int kw_count = 0;
-        char *tok = strtok(tmp, "\r\n");
+        char *ctx = NULL;
+        char *tok = strtok_s(tmp, "\r\n", &ctx);
         while (tok && kw_count < 256) {
                 while (*tok == ' ') tok++;
                 if (*tok) kw_list[kw_count++] = tok;
-                tok = strtok(NULL, "\r\n");
+                tok = strtok_s(NULL, "\r\n", &ctx);
         }
         if (kw_count == 0) {
                 s_flt_output = s_flt_source;
@@ -160,13 +160,10 @@ static void apply_filter(void) {
         while (*ls) {
                 const char *le = strstr(ls, "\r\n");
                 int ll = le ? (int)(le - ls) : (int)strlen(ls);
-                char lc[8192];
-                int cl = ll < (int)sizeof(lc) - 1 ? ll : (int)sizeof(lc) - 1;
-                memcpy(lc, ls, (size_t)cl);
-                lc[cl] = '\0';
+                std::string lc(ls, (size_t)ll);
                 bool match = false;
                 for (int i = 0; i < kw_count; i++) {
-                        if (stristr(lc, kw_list[i])) {
+                        if (stristr(lc.c_str(), kw_list[i])) {
                                 match = true;
                                 break;
                         }
@@ -232,8 +229,7 @@ void ui_render(GLFWwindow *w) {
         if (ImGui::Button("Find Latest", ImVec2(85, 0)))
                 do_find_latest(w);
         float footer = ImGui::GetFrameHeightWithSpacing() * 2 + 8;
-        ImGui::BeginChild("##output", ImVec2(0, -footer),
-                ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::BeginChild("##output", ImVec2(0, -footer), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
         if (!s_output.empty())
                 ImGui::TextUnformatted(s_output.c_str(), s_output.c_str() + s_output.size());
         ImGui::EndChild();
@@ -260,8 +256,7 @@ void ui_render(GLFWwindow *w) {
                 ImGui::OpenPopup("About");
                 s_open_about = false;
         }
-        if (ImGui::BeginPopupModal("Backup Settings", nullptr,
-                ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (ImGui::BeginPopupModal("Backup Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 ImGui::Checkbox("Enable automatic backup on game close", &s_bkp_enabled);
                 ImGui::Spacing();
                 ImGui::Text("Backup folder:");
@@ -291,8 +286,7 @@ void ui_render(GLFWwindow *w) {
                         ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
         }
-        if (ImGui::BeginPopupModal("About", nullptr,
-                ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (ImGui::BeginPopupModal("About", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 ImGui::Text(APP_TITLE);
                 ImGui::Text("Version " APP_VERSION);
                 ImGui::Spacing();

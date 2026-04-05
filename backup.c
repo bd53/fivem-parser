@@ -58,6 +58,10 @@ static void do_backup_save(void) {
         };
         SYSTEMTIME st;
         GetLocalTime(&st);
+        if (st.wMonth < 1 || st.wMonth > 12) {
+                free(parsed);
+                return;
+        }
         char dir[MAX_PATH + 64];
         snprintf(dir, sizeof(dir), "%s\\%04u\\%s", g_config.backup_path, (unsigned)st.wYear, months[st.wMonth - 1]);
         ensure_directory(dir);

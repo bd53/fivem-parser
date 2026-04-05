@@ -7,20 +7,17 @@
 void strip_color_codes(char *s) {
         char buf[8192];
         int j = 0;
-        for (int i = 0; s[i]; i++) {
+        for (int i = 0; s[i] && j < (int)sizeof(buf) - 1; i++) {
                 if (s[i] == '^') {
                         char nx = s[i + 1];
                         if (nx == '#') {
                                 int k = i + 2;
-                                while (s[k] && ((s[k] >= '0' && s[k] <= '9') ||
-                                       (s[k] >= 'a' && s[k] <= 'f') ||
-                                       (s[k] >= 'A' && s[k] <= 'F')))
+                                while (s[k] && ((s[k] >= '0' && s[k] <= '9') || (s[k] >= 'a' && s[k] <= 'f') || (s[k] >= 'A' && s[k] <= 'F')))
                                         k++;
                                 i = k - 1;
                                 continue;
                         }
-                        if ((nx >= '0' && nx <= '9') ||
-                            nx == '*' || nx == '_' || nx == 'r' || nx == '~') {
+                        if ((nx >= '0' && nx <= '9') || nx == '*' || nx == '_' || nx == 'r' || nx == '~') {
                                 i++;
                                 continue;
                         }
@@ -70,7 +67,7 @@ int find_latest_log(char *out, int out_size) {
         char best[MAX_PATH] = "";
         do {
                 if (strcmp(fd.cFileName, best) > 0)
-                        strcpy(best, fd.cFileName);
+                        snprintf(best, sizeof(best), "%s", fd.cFileName);
         } while (FindNextFileA(h, &fd));
         FindClose(h);
         snprintf(out, (size_t)out_size, "%s\\%s", dir, best);
