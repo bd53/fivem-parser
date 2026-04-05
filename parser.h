@@ -25,6 +25,21 @@ char *parse_log_file(const char *path, int remove_timestamps);
 int find_latest_log(char *out, int out_size);
 void get_fivem_logs_dir(char *out, int out_size);
 
+typedef struct {
+        char timestamp[64];
+        char raw[8192];
+        char plain[8192];
+} ChatEntry;
+
+typedef struct {
+        ChatEntry *entries;
+        int count;
+        int capacity;
+} ChatLog;
+
+ChatLog *parse_log_chat(const char *path, int remove_timestamps);
+void chatlog_free(ChatLog *log);
+
 void backup_on_timer(void);
 void backup_on_interval(void);
 

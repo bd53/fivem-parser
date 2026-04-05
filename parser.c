@@ -74,6 +74,84 @@ int find_latest_log(char *out, int out_size) {
         return 1;
 }
 
+ChatLog *parse_log_chat(const char *path, int remove_timestamps) {
+        FILE *f = fopen(path, "r");
+        if (!f)
+                return NULL;
+        ChatLog *log = (ChatLog *)calloc(1, sizeof(ChatLog));
+        if (!log) {
+                fclose(f);
+                return NULL;
+        }
+        log->capacity = 1024;
+        log->entries = (ChatEntry *)calloc((size_t)log->capacity, sizeof(ChatEntry));
+        if (!log->entries) {
+                free(log);
+                fclose(f);
+                return NULL;
+        }
+        char line[8192];
+        while (fgets(line, sizeof(line), f)) {
+                char *chat = strstr(line, "[chat] ");
+                if (!chat)
+                        continue;
+                chat += 7;
+                if (*chat == ' ')
+                        chat++;
+                char raw[8192];
+                strncpy(raw, chat, sizeof(raw) - 1);
+                raw[sizeof(raw) - 1] = '\0';
+                if (!rtrim_newline(raw))
+                        continue;
+                char plain[8192];
+                strncpy(plain, raw, sizeof(plain) - 1);
+                plain[sizeof(plain) - 1] = '\0';
+                strip_color_codes(plain);
+                if (!plain[0])
+                        continue;
+                if (log->count >= log->capacity) {
+                        log->capacity *= 2;
+                        ChatEntry *tmp = (ChatEntry *)realloc(log->entries, (size_t)log->capacity * sizeof(ChatEntry));
+                        if (!tmp)
+                                break;
+                        log->entries = tmp;
+                }
+                ChatEntry *e = &log->entries[log->count];
+                e->timestamp[0] = '\0';
+                if (!remove_timestamps && line[0] == '[') {
+                        char *end = strchr(line, ']');
+                        if (end) {
+                                char numstr[64] = "";
+                                int nlen = (int)(end - line) - 1;
+                                if (nlen > 0 && nlen < (int)sizeof(numstr)) {
+                                        memcpy(numstr, line + 1, (size_t)nlen);
+                                        numstr[nlen] = '\0';
+                                        long ms = atol(numstr);
+                                        long total_sec = ms / 1000;
+                                        int h = (int)(total_sec / 3600);
+                                        int m = (int)((total_sec % 3600) / 60);
+                                        int s = (int)(total_sec % 60);
+                                        snprintf(e->timestamp, sizeof(e->timestamp), "[%02d:%02d:%02d]", h, m, s);
+                                }
+                        }
+                }
+                strncpy(e->raw, raw, sizeof(e->raw) - 1);
+                e->raw[sizeof(e->raw) - 1] = '\0';
+                strncpy(e->plain, plain, sizeof(e->plain) - 1);
+                e->plain[sizeof(e->plain) - 1] = '\0';
+                log->count++;
+        }
+        fclose(f);
+        return log;
+}
+
+void chatlog_free(ChatLog *log) {
+        if (log) {
+                free(log->entries);
+                free(log);
+        }
+}
+
 char *parse_log_file(const char *path, int remove_timestamps) {
         FILE *f = fopen(path, "r");
         if (!f)

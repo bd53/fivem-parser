@@ -8,22 +8,37 @@
 #include <cstdio>
 #include <cctype>
 #include <string>
+#include <vector>
+#include <regex>
 
 extern "C" {
 #include "resource.h"
 #include "parser.h"
 }
 
+struct ColorSeg {
+        std::string text;
+        ImVec4 color;
+};
+
+struct ChatLine {
+        std::string timestamp;
+        std::string plain;
+        std::vector<ColorSeg> segments;
+};
+
 static char s_path[MAX_PATH * 2] = "";
-static std::string s_output;
 static bool s_remove_ts = false;
-static int s_chars = 0, s_lines = 0;
+
+static std::vector<ChatLine> s_chat;
+static int s_total_chars = 0;
 
 static bool s_show_filter = false;
 static char s_kw_buf[4096] = "";
-static std::string s_flt_source;
-static std::string s_flt_output;
-static int s_flt_chars = 0, s_flt_lines = 0;
+static bool s_use_regex = false;
+static std::vector<int> s_flt_indices;
+static int s_flt_chars = 0;
+static std::string s_regex_error;
 
 static bool s_open_backup = false;
 static bool s_bkp_enabled = false;
@@ -33,11 +48,111 @@ static int s_bkp_interval_min = 10;
 
 static bool s_open_about = false;
 
-static void count_text(const std::string &t, int &c, int &l) {
-        c = (int)t.size();
-        l = 0;
-        for (size_t i = 0; i < t.size(); i++)
-                if (t[i] == '\n') l++;
+static ImVec4 color_palette(int code) {
+        switch (code) {
+                case 0: return ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
+                case 1: return ImVec4(1.00f, 0.20f, 0.20f, 1.0f);
+                case 2: return ImVec4(0.20f, 1.00f, 0.20f, 1.0f);
+                case 3: return ImVec4(1.00f, 1.00f, 0.20f, 1.0f);
+                case 4: return ImVec4(0.30f, 0.55f, 1.00f, 1.0f);
+                case 5: return ImVec4(0.20f, 1.00f, 1.00f, 1.0f);
+                case 6: return ImVec4(1.00f, 0.30f, 1.00f, 1.0f);
+                case 7: return ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
+                case 8: return ImVec4(0.75f, 0.15f, 0.15f, 1.0f);
+                case 9: return ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
+                default: return ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
+        }
+}
+
+static std::vector<ColorSeg> parse_segments(const char *raw) {
+        std::vector<ColorSeg> segs;
+        ImVec4 color(1.0f, 1.0f, 1.0f, 1.0f);
+        std::string cur;
+        for (int i = 0; raw[i]; i++) {
+                if (raw[i] == '^' && raw[i + 1]) {
+                        char nx = raw[i + 1];
+                        if (nx == '#') {
+                                if (!cur.empty()) { segs.push_back({cur, color}); cur.clear(); }
+                                char hex[7] = {};
+                                int k = i + 2, h = 0;
+                                while (raw[k] && h < 6 && isxdigit((unsigned char)raw[k]))
+                                        hex[h++] = raw[k++];
+                                if (h == 6) {
+                                        unsigned v;
+                                        sscanf(hex, "%x", &v);
+                                        color = ImVec4(((v >> 16) & 0xFF) / 255.0f, ((v >> 8) & 0xFF) / 255.0f, (v & 0xFF) / 255.0f, 1.0f);
+                                }
+                                i = k - 1;
+                                continue;
+                        }
+                        if (nx >= '0' && nx <= '9') {
+                                if (!cur.empty()) { segs.push_back({cur, color}); cur.clear(); }
+                                color = color_palette(nx - '0');
+                                i++;
+                                continue;
+                        }
+                        if (nx == 'r' || nx == '~') {
+                                if (!cur.empty()) { segs.push_back({cur, color}); cur.clear(); }
+                                color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+                                i++;
+                                continue;
+                        }
+                        if (nx == '*' || nx == '_') {
+                                i++;
+                                continue;
+                        }
+                }
+                if (raw[i] == '~') {
+                        int k = i + 1;
+                        while (raw[k] && raw[k] != '~')
+                                k++;
+                        if (raw[k] == '~') {
+                                i = k;
+                                continue;
+                        }
+                }
+                cur += raw[i];
+        }
+        if (!cur.empty())
+                segs.push_back({cur, color});
+        return segs;
+}
+
+static void render_chat_line(const ChatLine &line) {
+        bool has_prev = false;
+        if (!line.timestamp.empty()) {
+                ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f), "%s ", line.timestamp.c_str());
+                has_prev = true;
+        }
+        for (size_t i = 0; i < line.segments.size(); i++) {
+                if (has_prev)
+                        ImGui::SameLine(0, 0);
+                ImGui::TextColored(line.segments[i].color, "%s", line.segments[i].text.c_str());
+                has_prev = true;
+        }
+        if (!has_prev)
+                ImGui::TextUnformatted("");
+}
+
+static std::string build_plain(const std::vector<ChatLine> &lines) {
+        std::string out;
+        for (auto &l : lines) {
+                if (!l.timestamp.empty()) { out += l.timestamp; out += ' '; }
+                out += l.plain;
+                out += "\r\n";
+        }
+        return out;
+}
+
+static std::string build_plain_indices(const std::vector<int> &indices) {
+        std::string out;
+        for (int idx : indices) {
+                auto &l = s_chat[idx];
+                if (!l.timestamp.empty()) { out += l.timestamp; out += ' '; }
+                out += l.plain;
+                out += "\r\n";
+        }
+        return out;
 }
 
 static const char *stristr(const char *h, const char *n) {
@@ -52,10 +167,99 @@ static const char *stristr(const char *h, const char *n) {
         return NULL;
 }
 
+static bool match_line(const char *text, const std::string &kw, bool use_regex, const std::regex *pat) {
+        if (use_regex)
+                return std::regex_search(text, *pat);
+        return stristr(text, kw.c_str()) != NULL;
+}
+
+static void apply_filter(void) {
+        s_flt_indices.clear();
+        s_flt_chars = 0;
+        s_regex_error.clear();
+        if (s_chat.empty())
+                return;
+        char tmp[4096];
+        strncpy(tmp, s_kw_buf, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        std::vector<std::string> kw_or, kw_and, kw_not;
+        char *ctx = NULL;
+        char *tok = strtok_s(tmp, "\r\n", &ctx);
+        while (tok) {
+                while (*tok == ' ') tok++;
+                if (!*tok) { tok = strtok_s(NULL, "\r\n", &ctx); continue; }
+                if (*tok == '+') {
+                        tok++;
+                        while (*tok == ' ') tok++;
+                        if (*tok) kw_and.push_back(tok);
+                } else if (*tok == '-') {
+                        tok++;
+                        while (*tok == ' ') tok++;
+                        if (*tok) kw_not.push_back(tok);
+                } else {
+                        kw_or.push_back(tok);
+                }
+                tok = strtok_s(NULL, "\r\n", &ctx);
+        }
+        if (kw_or.empty() && kw_and.empty() && kw_not.empty()) {
+                for (int i = 0; i < (int)s_chat.size(); i++)
+                        s_flt_indices.push_back(i);
+        } else {
+                std::vector<std::regex> re_or, re_and, re_not;
+                if (s_use_regex) {
+                        auto compile = [&](const std::vector<std::string> &src, std::vector<std::regex> &dst) -> bool {
+                                for (auto &kw : src) {
+                                        try {
+                                                dst.push_back(std::regex(kw, std::regex::icase));
+                                        } catch (std::regex_error &) {
+                                                s_regex_error = "Invalid regex: " + kw;
+                                                return false;
+                                        }
+                                }
+                                return true;
+                        };
+                        if (!compile(kw_or, re_or) || !compile(kw_and, re_and) || !compile(kw_not, re_not))
+                                return;
+                }
+                for (int i = 0; i < (int)s_chat.size(); i++) {
+                        const char *text = s_chat[i].plain.c_str();
+                        bool excluded = false;
+                        for (size_t j = 0; j < kw_not.size(); j++) {
+                                if (match_line(text, kw_not[j], s_use_regex, s_use_regex ? &re_not[j] : nullptr)) {
+                                        excluded = true;
+                                        break;
+                                }
+                        }
+                        if (excluded) continue;
+                        bool all_and = true;
+                        for (size_t j = 0; j < kw_and.size(); j++) {
+                                if (!match_line(text, kw_and[j], s_use_regex, s_use_regex ? &re_and[j] : nullptr)) {
+                                        all_and = false;
+                                        break;
+                                }
+                        }
+                        if (!all_and) continue;
+                        if (!kw_or.empty()) {
+                                bool any_or = false;
+                                for (size_t j = 0; j < kw_or.size(); j++) {
+                                        if (match_line(text, kw_or[j], s_use_regex, s_use_regex ? &re_or[j] : nullptr)) {
+                                                any_or = true;
+                                                break;
+                                        }
+                                }
+                                if (!any_or) continue;
+                        }
+                        s_flt_indices.push_back(i);
+                }
+        }
+        for (int idx : s_flt_indices)
+                s_flt_chars += (int)s_chat[idx].plain.size() + (int)s_chat[idx].timestamp.size() + 3;
+}
+
 static void do_find_latest(GLFWwindow *w) {
         char path[MAX_PATH * 2];
         if (!find_latest_log(path, sizeof(path))) {
-                MessageBoxA(glfwGetWin32Window(w), "No session found.\n\n" "Expected location:\n" "  %LOCALAPPDATA%\\FiveM\\FiveM.app\\logs\\\n\n" "Launch FiveM and join a server first.", "Error", MB_ICONWARNING);
+                MessageBoxA(glfwGetWin32Window(w), "No session found.\n\n" "Expected location:\n" "%LOCALAPPDATA%\\FiveM\\FiveM.app\\logs\\\n\n" "Launch FiveM and join a server first.", "Error", MB_ICONWARNING);
                 return;
         }
         snprintf(s_path, sizeof(s_path), "%s", path);
@@ -83,14 +287,23 @@ static void do_parse(GLFWwindow *w) {
                 MessageBoxA(glfwGetWin32Window(w), "Please select or auto-detect a log file first.", "Error", MB_ICONWARNING);
                 return;
         }
-        char *result = parse_log_file(s_path, s_remove_ts ? 1 : 0);
-        if (!result) {
+        ChatLog *log = parse_log_chat(s_path, s_remove_ts ? 1 : 0);
+        if (!log) {
                 MessageBoxA(glfwGetWin32Window(w), "Failed to open log file.\n\n" "Make sure FiveM has been launched at least once " "and the file exists at the specified path.", "Error", MB_ICONERROR);
                 return;
         }
-        s_output = result;
-        free(result);
-        count_text(s_output, s_chars, s_lines);
+        s_chat.clear();
+        s_total_chars = 0;
+        for (int i = 0; i < log->count; i++) {
+                ChatEntry *e = &log->entries[i];
+                ChatLine cl;
+                cl.timestamp = e->timestamp;
+                cl.plain = e->plain;
+                cl.segments = parse_segments(e->raw);
+                s_total_chars += (int)strlen(e->plain) + (int)strlen(e->timestamp) + 3;
+                s_chat.push_back(std::move(cl));
+        }
+        chatlog_free(log);
 }
 
 static void do_save(GLFWwindow *w, const std::string &text, const char *default_name) {
@@ -126,58 +339,6 @@ static void do_copy(GLFWwindow *w, const std::string &text) {
                 glfwSetClipboardString(w, text.c_str());
 }
 
-static void apply_filter(void) {
-        if (s_flt_source.empty()) {
-                s_flt_output.clear();
-                s_flt_chars = s_flt_lines = 0;
-                return;
-        }
-        if (!s_kw_buf[0]) {
-                s_flt_output = s_flt_source;
-                count_text(s_flt_output, s_flt_chars, s_flt_lines);
-                return;
-        }
-        char tmp[4096];
-        strncpy(tmp, s_kw_buf, sizeof(tmp) - 1);
-        tmp[sizeof(tmp) - 1] = '\0';
-        const char *kw_list[256];
-        int kw_count = 0;
-        char *ctx = NULL;
-        char *tok = strtok_s(tmp, "\r\n", &ctx);
-        while (tok && kw_count < 256) {
-                while (*tok == ' ') tok++;
-                if (*tok) kw_list[kw_count++] = tok;
-                tok = strtok_s(NULL, "\r\n", &ctx);
-        }
-        if (kw_count == 0) {
-                s_flt_output = s_flt_source;
-                count_text(s_flt_output, s_flt_chars, s_flt_lines);
-                return;
-        }
-        std::string result;
-        result.reserve(s_flt_source.size());
-        const char *ls = s_flt_source.c_str();
-        while (*ls) {
-                const char *le = strstr(ls, "\r\n");
-                int ll = le ? (int)(le - ls) : (int)strlen(ls);
-                std::string lc(ls, (size_t)ll);
-                bool match = false;
-                for (int i = 0; i < kw_count; i++) {
-                        if (stristr(lc.c_str(), kw_list[i])) {
-                                match = true;
-                                break;
-                        }
-                }
-                if (match) {
-                        result.append(ls, (size_t)ll);
-                        if (le) result.append("\r\n");
-                }
-                ls = le ? le + 2 : ls + ll;
-        }
-        s_flt_output = result;
-        count_text(s_flt_output, s_flt_chars, s_flt_lines);
-}
-
 void ui_init(GLFWwindow *w) {
         (void)w;
         s_remove_ts = (g_config.remove_timestamps != 0);
@@ -201,10 +362,13 @@ void ui_render(GLFWwindow *w) {
         if (ImGui::BeginMenuBar()) {
                 if (ImGui::MenuItem("Filter Chat Log")) {
                         s_show_filter = true;
-                        s_flt_source = s_output;
-                        s_flt_output = s_output;
                         s_kw_buf[0] = '\0';
-                        count_text(s_flt_output, s_flt_chars, s_flt_lines);
+                        s_use_regex = false;
+                        s_regex_error.clear();
+                        s_flt_indices.clear();
+                        for (int i = 0; i < (int)s_chat.size(); i++)
+                                s_flt_indices.push_back(i);
+                        s_flt_chars = s_total_chars;
                 }
                 if (ImGui::MenuItem("Backup Settings")) {
                         s_open_backup = true;
@@ -230,10 +394,16 @@ void ui_render(GLFWwindow *w) {
                 do_find_latest(w);
         float footer = ImGui::GetFrameHeightWithSpacing() * 2 + 8;
         ImGui::BeginChild("##output", ImVec2(0, -footer), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
-        if (!s_output.empty())
-                ImGui::TextUnformatted(s_output.c_str(), s_output.c_str() + s_output.size());
+        if (!s_chat.empty()) {
+                ImGuiListClipper clipper;
+                clipper.Begin((int)s_chat.size());
+                while (clipper.Step()) {
+                        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+                                render_chat_line(s_chat[i]);
+                }
+        }
         ImGui::EndChild();
-        ImGui::Text("%d characters and %d lines", s_chars, s_lines);
+        ImGui::Text("%d characters  |  %d messages", s_total_chars, (int)s_chat.size());
         ImGui::Checkbox("Remove timestamps", &s_remove_ts);
         ImGui::SameLine();
         float bw = 72;
@@ -243,11 +413,15 @@ void ui_render(GLFWwindow *w) {
         if (ImGui::Button("PARSE", ImVec2(bw, 0)))
                 do_parse(w);
         ImGui::SameLine();
-        if (ImGui::Button("SAVE AS", ImVec2(bw, 0)))
-                do_save(w, s_output, "chat_log.txt");
+        if (ImGui::Button("SAVE AS", ImVec2(bw, 0))) {
+                std::string plain = build_plain(s_chat);
+                do_save(w, plain, "chat_log.txt");
+        }
         ImGui::SameLine();
-        if (ImGui::Button("COPY", ImVec2(bw, 0)))
-                do_copy(w, s_output);
+        if (ImGui::Button("COPY", ImVec2(bw, 0))) {
+                std::string plain = build_plain(s_chat);
+                do_copy(w, plain);
+        }
         if (s_open_backup) {
                 ImGui::OpenPopup("Backup Settings");
                 s_open_backup = false;
@@ -292,8 +466,9 @@ void ui_render(GLFWwindow *w) {
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
-                ImGui::Text("https://t.me/enclaimed");
                 ImGui::Text("https://github.com/bd53");
+                ImGui::Text("https://t.me/enclaimed");
+                ImGui::Text("https://discord.gg/users/death_enclaimed");
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
@@ -305,31 +480,50 @@ void ui_render(GLFWwindow *w) {
         if (s_show_filter) {
                 ImGui::SetNextWindowSize(ImVec2(640, 490), ImGuiCond_FirstUseEver);
                 if (ImGui::Begin("Filter Chat Log", &s_show_filter)) {
-                        ImGui::Text("Keywords (one per line):");
+                        ImGui::Text("Keywords (one per line): +must have -exclude or plain OR");
                         ImGui::InputTextMultiline("##flt_kw", s_kw_buf, sizeof(s_kw_buf), ImVec2(-1, 80));
                         if (ImGui::Button("FILTER", ImVec2(90, 0)))
                                 apply_filter();
                         ImGui::SameLine();
                         if (ImGui::Button("CLEAR", ImVec2(90, 0))) {
                                 s_kw_buf[0] = '\0';
-                                s_flt_output = s_flt_source;
-                                count_text(s_flt_output, s_flt_chars, s_flt_lines);
+                                s_regex_error.clear();
+                                s_flt_indices.clear();
+                                for (int i = 0; i < (int)s_chat.size(); i++)
+                                        s_flt_indices.push_back(i);
+                                s_flt_chars = s_total_chars;
+                        }
+                        ImGui::SameLine();
+                        ImGui::Checkbox("Regex", &s_use_regex);
+                        if (!s_regex_error.empty()) {
+                                ImGui::SameLine();
+                                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", s_regex_error.c_str());
                         }
                         float flt_footer = ImGui::GetFrameHeightWithSpacing() + 8;
                         ImGui::BeginChild("##flt_out", ImVec2(0, -flt_footer), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
-                        if (!s_flt_output.empty())
-                                ImGui::TextUnformatted(s_flt_output.c_str(), s_flt_output.c_str() + s_flt_output.size());
+                        if (!s_flt_indices.empty()) {
+                                ImGuiListClipper clipper;
+                                clipper.Begin((int)s_flt_indices.size());
+                                while (clipper.Step()) {
+                                        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+                                                render_chat_line(s_chat[s_flt_indices[i]]);
+                                }
+                        }
                         ImGui::EndChild();
-                        ImGui::Text("%d characters and %d lines", s_flt_chars, s_flt_lines);
+                        ImGui::Text("%d characters and %d lines", s_flt_chars, (int)s_flt_indices.size());
                         ImGui::SameLine();
                         float fw = 90;
                         float fsp = ImGui::GetStyle().ItemSpacing.x;
                         ImGui::SameLine(ImGui::GetWindowWidth() - fw * 2 - fsp - ImGui::GetStyle().WindowPadding.x);
-                        if (ImGui::Button("SAVE AS##flt", ImVec2(fw, 0)))
-                                do_save(w, s_flt_output, "filtered_chat.txt");
+                        if (ImGui::Button("SAVE AS##flt", ImVec2(fw, 0))) {
+                                std::string plain = build_plain_indices(s_flt_indices);
+                                do_save(w, plain, "filtered_chat.txt");
+                        }
                         ImGui::SameLine();
-                        if (ImGui::Button("COPY##flt", ImVec2(fw, 0)))
-                                do_copy(w, s_flt_output);
+                        if (ImGui::Button("COPY##flt", ImVec2(fw, 0))) {
+                                std::string plain = build_plain_indices(s_flt_indices);
+                                do_copy(w, plain);
+                        }
                 }
                 ImGui::End();
         }
