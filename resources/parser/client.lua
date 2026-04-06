@@ -1,6 +1,13 @@
+local parsingEnabled = false
+
+RegisterNetEvent('parser:setState', function(state)
+        if type(state) ~= 'boolean' then return end
+        parsingEnabled = state
+end)
+
 local function sanitize(str)
         if type(str) ~= 'string' then return nil end
-        return (str:gsub('[\r\n]', ''))
+        return (str:gsub('%c', ''))
 end
 
 local function log(author, text)
@@ -21,10 +28,12 @@ local function extract(message)
 end
 
 RegisterNetEvent('chat:addMessage', function(message)
+        if not parsingEnabled then return end
         local author, text = extract(message)
         log(author, text)
 end)
 
 RegisterNetEvent('chatMessage', function(author, _, text)
+        if not parsingEnabled then return end
         log(author, text)
 end)
