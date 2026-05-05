@@ -15,7 +15,7 @@ static const float FONT_SIZE = 14.0f;
 static const int PAD_X = 10;
 static const int PAD_Y = 6;
 static const int LINE_SPACING = 3;
-static const int OUTLINE_R = 1; // utline radius in pixels
+static const int OUTLINE_R = 1;
 
 static bool load_font_file(std::vector<unsigned char> &buf) {
         static const char *candidates[] = { "C:\\Windows\\Fonts\\arialbd.ttf", "C:\\Windows\\Fonts\\arial.ttf", "C:\\Windows\\Fonts\\verdanab.ttf", "C:\\Windows\\Fonts\\verdana.ttf" };
@@ -108,7 +108,7 @@ static int measure_string_width(stbtt_fontinfo *font, float scale, const char *t
         return w;
 }
 
-bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines) {
+bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines, int wrap_width) {
         if (lines.empty()) return false;
         std::vector<unsigned char> font_data;
         if (!load_font_file(font_data)) return false;
@@ -131,20 +131,68 @@ bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines
                         w += measure_string_width(&font, scale, seg.text.c_str(), (int)seg.text.size());
                 if (w > max_w) max_w = w;
         }
-        int img_w = max_w + PAD_X * 2 + OUTLINE_R * 2;
-        int img_h = (int)lines.size() * line_h + PAD_Y * 2 + OUTLINE_R * 2;
-        std::vector<unsigned char> pixels((size_t)(img_w * img_h * 4), 0);
-        for (int li = 0; li < (int)lines.size(); li++) {
-                const ChatLine &cl = lines[li];
-                int pen_x = PAD_X + OUTLINE_R;
-                int pen_y = PAD_Y + OUTLINE_R + li * line_h;
+        int content_w = (max_w < wrap_width) ? max_w : wrap_width;
+        int total_rows = 0;
+        for (const ChatLine &cl : lines) {
+                int pen_x = 0;
+                int rows = 1;
+                auto count_span = [&](const char *text, int len) {
+                        const char *p = text;
+                        const char *end = text + len;
+                        while (p < end && *p) {
+                                const char *word_end = p;
+                                while (word_end < end && *word_end && *word_end != ' ') word_end++;
+                                if (word_end < end && *word_end == ' ') word_end++;
+                                if (word_end == p) { p++; continue; }
+                                int word_w = measure_string_width(&font, scale, p, (int)(word_end - p));
+                                if (pen_x > 0 && pen_x + word_w > content_w) {
+                                        pen_x = 0;
+                                        rows++;
+                                }
+                                pen_x += word_w;
+                                p = word_end;
+                        }
+                };
                 if (!cl.timestamp.empty()) {
                         std::string ts = cl.timestamp + " ";
-                        render_string_outlined(pixels.data(), img_w, img_h, &pen_x, pen_y, ts.c_str(), (int)ts.size(), 0.55f, 0.55f, 0.55f, &font, scale, scaled_ascent);
+                        count_span(ts.c_str(), (int)ts.size());
                 }
-                for (const ColorSeg &seg : cl.segments) {
-                        render_string_outlined(pixels.data(), img_w, img_h, &pen_x, pen_y, seg.text.c_str(), (int)seg.text.size(), seg.color.x, seg.color.y, seg.color.z, &font, scale, scaled_ascent);
+                for (const ColorSeg &seg : cl.segments)
+                        count_span(seg.text.c_str(), (int)seg.text.size());
+                total_rows += rows;
+        }
+        int img_w = content_w + PAD_X * 2 + OUTLINE_R * 2;
+        int img_h = total_rows * line_h + PAD_Y * 2 + OUTLINE_R * 2;
+        std::vector<unsigned char> pixels((size_t)(img_w * img_h * 4), 0);
+        const int start_x = PAD_X + OUTLINE_R;
+        const int content_right = start_x + content_w;
+        int pen_y = PAD_Y + OUTLINE_R;
+        for (const ChatLine &cl : lines) {
+                int pen_x = start_x;
+                auto render_span = [&](const char *text, int len, float r, float g, float b) {
+                        const char *p = text;
+                        const char *end = text + len;
+                        while (p < end && *p) {
+                                const char *word_end = p;
+                                while (word_end < end && *word_end && *word_end != ' ') word_end++;
+                                if (word_end < end && *word_end == ' ') word_end++;
+                                if (word_end == p) { p++; continue; }
+                                int word_w = measure_string_width(&font, scale, p, (int)(word_end - p));
+                                if (pen_x > start_x && pen_x + word_w > content_right) {
+                                        pen_x = start_x;
+                                        pen_y += line_h;
+                                }
+                                render_string_outlined(pixels.data(), img_w, img_h, &pen_x, pen_y, p, (int)(word_end - p), r, g, b, &font, scale, scaled_ascent);
+                                p = word_end;
+                        }
+                };
+                if (!cl.timestamp.empty()) {
+                        std::string ts = cl.timestamp + " ";
+                        render_span(ts.c_str(), (int)ts.size(), 0.55f, 0.55f, 0.55f);
                 }
+                for (const ColorSeg &seg : cl.segments)
+                        render_span(seg.text.c_str(), (int)seg.text.size(), seg.color.x, seg.color.y, seg.color.z);
+                pen_y += line_h;
         }
         int ok = stbi_write_png(output_path, img_w, img_h, 4, pixels.data(), img_w * 4);
         return ok != 0;

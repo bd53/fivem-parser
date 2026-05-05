@@ -17,4 +17,4 @@ struct ChatLine {
 
 ImVec4 color_palette(int code);
 std::vector<ColorSeg> parse_segments(const char *raw);
-bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines);
+bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines, int wrap_width);

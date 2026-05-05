@@ -40,30 +40,56 @@ static int s_edit_line = -1;
 static bool s_open_edit_popup = false;
 static char s_edit_buf[1024] = "";
 
-static bool s_bulk_delete_mode = false;
-static std::vector<bool> s_bulk_delete_sel;
-static bool s_flt_bulk_delete_mode = false;
-static std::vector<bool> s_flt_bulk_delete_sel;
-
-static bool s_bulk_export_mode = false;
-static std::vector<bool> s_bulk_export_sel;
-static bool s_flt_bulk_export_mode = false;
-static std::vector<bool> s_flt_bulk_export_sel;
+static bool s_bulk_select_mode = false;
+static std::vector<bool> s_bulk_sel;
+static bool s_flt_bulk_select_mode = false;
+static std::vector<bool> s_flt_bulk_sel;
 
 static void render_chat_line(const ChatLine &line) {
-        bool has_prev = false;
+        ImFont *font = ImGui::GetFont();
+        const float font_size = ImGui::GetFontSize();
+        const float line_h = ImGui::GetTextLineHeightWithSpacing();
+        const float char_h = ImGui::GetTextLineHeight();
+        float avail_w = ImGui::GetContentRegionAvail().x;
+        if (avail_w <= 0.0f) avail_w = 200.0f;
+        const ImVec2 item_pos = ImGui::GetCursorScreenPos();
+        const float start_x = item_pos.x;
+        const float wrap_limit = (avail_w < (float)g_config.wrap_width) ? avail_w : (float)g_config.wrap_width;
+        const float max_x = start_x + wrap_limit;
+        const float scroll_y = ImGui::GetScrollY();
+        const float win_h = ImGui::GetWindowHeight();
+        const bool should_draw = (item_pos.y < scroll_y + win_h + line_h) && (item_pos.y > scroll_y - win_h);
+        ImDrawList *dl = should_draw ? ImGui::GetWindowDrawList() : nullptr;
+        float pen_x = start_x;
+        float pen_y = item_pos.y;
+        float total_h = char_h;
+        auto process_span = [&](const char *text, ImU32 col) {
+                if (!text || !*text) return;
+                const char *p = text;
+                while (*p) {
+                        const char *word_end = p;
+                        while (*word_end && *word_end != ' ') word_end++;
+                        if (*word_end == ' ') word_end++;
+                        if (word_end == p) { p++; continue; }
+                        const float word_w = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, p, word_end).x;
+                        if (pen_x > start_x && pen_x + word_w > max_x) {
+                                pen_x = start_x;
+                                pen_y += line_h;
+                                total_h += line_h;
+                        }
+                        if (dl)
+                                dl->AddText(font, font_size, ImVec2(pen_x, pen_y), col, p, word_end);
+                        pen_x += word_w;
+                        p = word_end;
+                }
+        };
         if (!line.timestamp.empty()) {
-                ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f), "%s ", line.timestamp.c_str());
-                has_prev = true;
+                std::string ts = line.timestamp + " ";
+                process_span(ts.c_str(), IM_COL32(140, 140, 140, 255));
         }
-        for (size_t i = 0; i < line.segments.size(); i++) {
-                if (has_prev)
-                        ImGui::SameLine(0, 0);
-                ImGui::TextColored(line.segments[i].color, "%s", line.segments[i].text.c_str());
-                has_prev = true;
-        }
-        if (!has_prev)
-                ImGui::TextUnformatted("");
+        for (const auto &seg : line.segments)
+                process_span(seg.text.c_str(), ImGui::ColorConvertFloat4ToU32(seg.color));
+        ImGui::Dummy(ImVec2(avail_w, total_h));
 }
 
 static std::string build_plain(const std::vector<ChatLine> &lines) {
@@ -105,10 +131,8 @@ static void apply_filter(void) {
         s_flt_indices.reserve(s_chat.size());
         s_flt_chars = 0;
         s_regex_error.clear();
-        s_flt_bulk_delete_mode = false;
-        s_flt_bulk_delete_sel.clear();
-        s_flt_bulk_export_mode = false;
-        s_flt_bulk_export_sel.clear();
+        s_flt_bulk_select_mode = false;
+        s_flt_bulk_sel.clear();
         if (s_chat.empty())
                 return;
         char tmp[4096];
@@ -260,10 +284,8 @@ static void do_parse(GLFWwindow *w) {
         }
         chatlog_free(log);
         s_chat = std::move(tmp);
-        s_bulk_delete_mode = false;
-        s_bulk_delete_sel.clear();
-        s_bulk_export_mode = false;
-        s_bulk_export_sel.clear();
+        s_bulk_select_mode = false;
+        s_bulk_sel.clear();
         s_flt_indices.clear();
         s_flt_indices.shrink_to_fit();
         s_flt_chars = 0;
@@ -323,7 +345,7 @@ static void do_export_png(GLFWwindow *w, const std::vector<ChatLine> &lines) {
         ofn.Flags = OFN_OVERWRITEPROMPT;
         ofn.lpstrDefExt = "png";
         if (!GetSaveFileNameA(&ofn)) return;
-        if (export_chat_png(fname, lines)) {
+        if (export_chat_png(fname, lines, g_config.wrap_width)) {
                 MessageBoxA(glfwGetWin32Window(w), "PNG exported successfully.", "Exported", MB_ICONINFORMATION);
         } else {
                 MessageBoxA(glfwGetWin32Window(w), "Failed to export PNG.\n\nArial font was not found on this system.", "Error", MB_ICONERROR);
@@ -379,52 +401,34 @@ void ui_render(GLFWwindow *w) {
         if (ImGui::Button("Find Latest", ImVec2(85, 0)))
                 do_find_latest(w);
         float footer = ImGui::GetFrameHeightWithSpacing() * 2 + 8;
-        ImGui::BeginChild("##output", ImVec2(0, -footer), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::BeginChild("##output", ImVec2(0, -footer), ImGuiChildFlags_Borders);
         if (!s_chat.empty()) {
-                ImGuiListClipper clipper;
-                clipper.Begin((int)s_chat.size());
-                while (clipper.Step()) {
-                        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
-                                ImGui::PushID(i);
-                                if (s_bulk_delete_mode && i < (int)s_bulk_delete_sel.size()) {
-                                        bool chk = s_bulk_delete_sel[i];
-                                        ImGui::Checkbox("##chk", &chk);
-                                        s_bulk_delete_sel[i] = chk;
-                                        ImGui::SameLine(0, 4);
-                                } else if (s_bulk_export_mode && i < (int)s_bulk_export_sel.size()) {
-                                        bool chk = s_bulk_export_sel[i];
-                                        ImGui::Checkbox("##xchk", &chk);
-                                        s_bulk_export_sel[i] = chk;
-                                        ImGui::SameLine(0, 4);
-                                }
-                                ImGui::BeginGroup();
-                                render_chat_line(s_chat[i]);
-                                ImGui::EndGroup();
-                                if (!s_bulk_delete_mode && !s_bulk_export_mode && ImGui::BeginPopupContextItem("##ctx", ImGuiPopupFlags_MouseButtonRight)) {
-                                        if (ImGui::MenuItem("Edit Line")) {
-                                                s_edit_line = i;
-                                                strncpy(s_edit_buf, s_chat[i].raw.c_str(), sizeof(s_edit_buf) - 1);
-                                                s_edit_buf[sizeof(s_edit_buf) - 1] = '\0';
-                                                s_open_edit_popup = true;
-                                        }
-                                        if (ImGui::MenuItem("Delete Line(s)")) {
-                                                s_bulk_delete_mode = true;
-                                                s_bulk_export_mode = false;
-                                                s_bulk_export_sel.clear();
-                                                s_bulk_delete_sel.assign(s_chat.size(), false);
-                                                s_bulk_delete_sel[i] = true;
-                                        }
-                                        if (ImGui::MenuItem("Export Line(s) as PNG")) {
-                                                s_bulk_export_mode = true;
-                                                s_bulk_delete_mode = false;
-                                                s_bulk_delete_sel.clear();
-                                                s_bulk_export_sel.assign(s_chat.size(), false);
-                                                s_bulk_export_sel[i] = true;
-                                        }
-                                        ImGui::EndPopup();
-                                }
-                                ImGui::PopID();
+                for (int i = 0; i < (int)s_chat.size(); i++) {
+                        ImGui::PushID(i);
+                        if (s_bulk_select_mode && i < (int)s_bulk_sel.size()) {
+                                bool chk = s_bulk_sel[i];
+                                ImGui::Checkbox("##chk", &chk);
+                                s_bulk_sel[i] = chk;
+                                ImGui::SameLine(0, 4);
                         }
+                        ImGui::BeginGroup();
+                        render_chat_line(s_chat[i]);
+                        ImGui::EndGroup();
+                        if (!s_bulk_select_mode && ImGui::BeginPopupContextItem("##ctx", ImGuiPopupFlags_MouseButtonRight)) {
+                                if (ImGui::MenuItem("Edit Line")) {
+                                        s_edit_line = i;
+                                        strncpy(s_edit_buf, s_chat[i].raw.c_str(), sizeof(s_edit_buf) - 1);
+                                        s_edit_buf[sizeof(s_edit_buf) - 1] = '\0';
+                                        s_open_edit_popup = true;
+                                }
+                                if (ImGui::MenuItem("Select Line(s)")) {
+                                        s_bulk_select_mode = true;
+                                        s_bulk_sel.assign(s_chat.size(), false);
+                                        s_bulk_sel[i] = true;
+                                }
+                                ImGui::EndPopup();
+                        }
+                        ImGui::PopID();
                 }
         }
         ImGui::EndChild();
@@ -462,58 +466,50 @@ void ui_render(GLFWwindow *w) {
                 }
                 ImGui::EndPopup();
         }
-        if (s_bulk_delete_mode) {
+        if (s_bulk_select_mode) {
                 int sel_count = 0;
-                for (bool b : s_bulk_delete_sel) if (b) sel_count++;
-                ImGui::Text("%d line(s) selected - check lines to mark for deletion", sel_count);
+                for (bool b : s_bulk_sel) if (b) sel_count++;
+                ImGui::Text("%d line(s) selected", sel_count);
                 char del_label[64];
-                snprintf(del_label, sizeof(del_label), "Delete (%d)###bdel", sel_count);
+                snprintf(del_label, sizeof(del_label), "Delete (%d)###bsel_del", sel_count);
                 if (ImGui::Button(del_label, ImVec2(110, 0))) {
-                        for (int j = (int)s_bulk_delete_sel.size() - 1; j >= 0; j--)
-                                if (s_bulk_delete_sel[j]) delete_chat_line(j);
-                        s_bulk_delete_mode = false;
-                        s_bulk_delete_sel.clear();
+                        for (int j = (int)s_bulk_sel.size() - 1; j >= 0; j--)
+                                if (s_bulk_sel[j]) delete_chat_line(j);
+                        s_bulk_select_mode = false;
+                        s_bulk_sel.clear();
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("Cancel##bdel", ImVec2(70, 0))) {
-                        s_bulk_delete_mode = false;
-                        s_bulk_delete_sel.clear();
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("All##bdel", ImVec2(50, 0)))
-                        for (auto &&b : s_bulk_delete_sel) b = true;
-                ImGui::SameLine();
-                if (ImGui::Button("None##bdel", ImVec2(55, 0)))
-                        for (auto &&b : s_bulk_delete_sel) b = false;
-        } else if (s_bulk_export_mode) {
-                int sel_count = 0;
-                for (bool b : s_bulk_export_sel) if (b) sel_count++;
-                ImGui::Text("%d line(s) selected - check lines to include in PNG export", sel_count);
-                char exp_label[64];
-                snprintf(exp_label, sizeof(exp_label), "Export PNG (%d)###bexp", sel_count);
-                if (ImGui::Button(exp_label, ImVec2(130, 0))) {
+                if (ImGui::Button("Export PNG###bsel_exp", ImVec2(95, 0))) {
                         std::vector<ChatLine> sel_lines;
-                        for (int j = 0; j < (int)s_bulk_export_sel.size(); j++)
-                                if (s_bulk_export_sel[j] && j < (int)s_chat.size())
+                        for (int j = 0; j < (int)s_bulk_sel.size(); j++)
+                                if (s_bulk_sel[j] && j < (int)s_chat.size())
                                         sel_lines.push_back(s_chat[j]);
                         do_export_png(w, sel_lines);
-                        s_bulk_export_mode = false;
-                        s_bulk_export_sel.clear();
+                        s_bulk_select_mode = false;
+                        s_bulk_sel.clear();
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("Cancel##bexp", ImVec2(70, 0))) {
-                        s_bulk_export_mode = false;
-                        s_bulk_export_sel.clear();
+                if (ImGui::Button("Cancel##bsel", ImVec2(70, 0))) {
+                        s_bulk_select_mode = false;
+                        s_bulk_sel.clear();
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("All##bexp", ImVec2(50, 0)))
-                        for (auto &&b : s_bulk_export_sel) b = true;
+                if (ImGui::Button("All##bsel", ImVec2(50, 0)))
+                        for (auto &&b : s_bulk_sel) b = true;
                 ImGui::SameLine();
-                if (ImGui::Button("None##bexp", ImVec2(55, 0)))
-                        for (auto &&b : s_bulk_export_sel) b = false;
+                if (ImGui::Button("None##bsel", ImVec2(55, 0)))
+                        for (auto &&b : s_bulk_sel) b = false;
         } else {
                 ImGui::Text("%u characters  |  %u messages", (unsigned)s_total_chars, (unsigned)s_chat.size());
                 ImGui::Checkbox("Remove timestamps", &s_remove_ts);
+                ImGui::SameLine();
+                ImGui::Text("Wrap:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(55);
+                if (ImGui::InputInt("##wrap", &g_config.wrap_width, 0, 0)) {
+                        if (g_config.wrap_width < 100) g_config.wrap_width = 100;
+                        if (g_config.wrap_width > 2000) g_config.wrap_width = 2000;
+                }
                 ImGui::SameLine();
                 float bw = 72, bw_exp = 92;
                 float sp = ImGui::GetStyle().ItemSpacing.x;
@@ -546,12 +542,15 @@ void ui_render(GLFWwindow *w) {
                 ImGui::Separator();
                 ImGui::Spacing();
                 ImGui::Text("https://github.com/bd53");
-                ImGui::Text("https://t.me/enclaimed");
-                ImGui::Text("https://discord.gg/users/death_enclaimed");
+                ImGui::Text("https://discord.gg/users/colonelfuhrberger");
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
-                if (ImGui::Button("OK", ImVec2(120, 0)))
+                float btn_w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
+                if (ImGui::Button("OK", ImVec2(btn_w, 0)))
+                        ImGui::CloseCurrentPopup();
+                ImGui::SameLine();
+                if (ImGui::Button("Close", ImVec2(btn_w, 0)))
                         ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
         }
@@ -579,53 +578,35 @@ void ui_render(GLFWwindow *w) {
                                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", s_regex_error.c_str());
                         }
                         float flt_footer = ImGui::GetFrameHeightWithSpacing() + 8;
-                        ImGui::BeginChild("##flt_out", ImVec2(0, -flt_footer), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+                        ImGui::BeginChild("##flt_out", ImVec2(0, -flt_footer), ImGuiChildFlags_Borders);
                         if (!s_flt_indices.empty()) {
-                                ImGuiListClipper clipper;
-                                clipper.Begin((int)s_flt_indices.size());
-                                while (clipper.Step()) {
-                                        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
-                                                int chat_idx = s_flt_indices[i];
-                                                ImGui::PushID(i);
-                                                if (s_flt_bulk_delete_mode && i < (int)s_flt_bulk_delete_sel.size()) {
-                                                        bool chk = s_flt_bulk_delete_sel[i];
-                                                        ImGui::Checkbox("##fchk", &chk);
-                                                        s_flt_bulk_delete_sel[i] = chk;
-                                                        ImGui::SameLine(0, 4);
-                                                } else if (s_flt_bulk_export_mode && i < (int)s_flt_bulk_export_sel.size()) {
-                                                        bool chk = s_flt_bulk_export_sel[i];
-                                                        ImGui::Checkbox("##fxchk", &chk);
-                                                        s_flt_bulk_export_sel[i] = chk;
-                                                        ImGui::SameLine(0, 4);
-                                                }
-                                                ImGui::BeginGroup();
-                                                render_chat_line(s_chat[chat_idx]);
-                                                ImGui::EndGroup();
-                                                if (!s_flt_bulk_delete_mode && !s_flt_bulk_export_mode && ImGui::BeginPopupContextItem("##fctx", ImGuiPopupFlags_MouseButtonRight)) {
-                                                        if (ImGui::MenuItem("Edit Line")) {
-                                                                s_edit_line = chat_idx;
-                                                                strncpy(s_edit_buf, s_chat[chat_idx].raw.c_str(), sizeof(s_edit_buf) - 1);
-                                                                s_edit_buf[sizeof(s_edit_buf) - 1] = '\0';
-                                                                s_open_edit_popup = true;
-                                                        }
-                                                        if (ImGui::MenuItem("Delete Line(s)")) {
-                                                                s_flt_bulk_delete_mode = true;
-                                                                s_flt_bulk_export_mode = false;
-                                                                s_flt_bulk_export_sel.clear();
-                                                                s_flt_bulk_delete_sel.assign(s_flt_indices.size(), false);
-                                                                s_flt_bulk_delete_sel[i] = true;
-                                                        }
-                                                        if (ImGui::MenuItem("Export Line(s) as PNG")) {
-                                                                s_flt_bulk_export_mode = true;
-                                                                s_flt_bulk_delete_mode = false;
-                                                                s_flt_bulk_delete_sel.clear();
-                                                                s_flt_bulk_export_sel.assign(s_flt_indices.size(), false);
-                                                                s_flt_bulk_export_sel[i] = true;
-                                                        }
-                                                        ImGui::EndPopup();
-                                                }
-                                                ImGui::PopID();
+                                for (int i = 0; i < (int)s_flt_indices.size(); i++) {
+                                        int chat_idx = s_flt_indices[i];
+                                        ImGui::PushID(i);
+                                        if (s_flt_bulk_select_mode && i < (int)s_flt_bulk_sel.size()) {
+                                                bool chk = s_flt_bulk_sel[i];
+                                                ImGui::Checkbox("##fchk", &chk);
+                                                s_flt_bulk_sel[i] = chk;
+                                                ImGui::SameLine(0, 4);
                                         }
+                                        ImGui::BeginGroup();
+                                        render_chat_line(s_chat[chat_idx]);
+                                        ImGui::EndGroup();
+                                        if (!s_flt_bulk_select_mode && ImGui::BeginPopupContextItem("##fctx", ImGuiPopupFlags_MouseButtonRight)) {
+                                                if (ImGui::MenuItem("Edit Line")) {
+                                                        s_edit_line = chat_idx;
+                                                        strncpy(s_edit_buf, s_chat[chat_idx].raw.c_str(), sizeof(s_edit_buf) - 1);
+                                                        s_edit_buf[sizeof(s_edit_buf) - 1] = '\0';
+                                                        s_open_edit_popup = true;
+                                                }
+                                                if (ImGui::MenuItem("Select Line(s)")) {
+                                                        s_flt_bulk_select_mode = true;
+                                                        s_flt_bulk_sel.assign(s_flt_indices.size(), false);
+                                                        s_flt_bulk_sel[i] = true;
+                                                }
+                                                ImGui::EndPopup();
+                                        }
+                                        ImGui::PopID();
                                 }
                         }
                         ImGui::EndChild();
@@ -633,63 +614,46 @@ void ui_render(GLFWwindow *w) {
                                 delete_chat_line(s_pending_delete);
                                 s_pending_delete = -1;
                         }
-                        if (s_flt_bulk_delete_mode) {
+                        if (s_flt_bulk_select_mode) {
                                 int flt_sel_count = 0;
-                                for (bool b : s_flt_bulk_delete_sel) if (b) flt_sel_count++;
+                                for (bool b : s_flt_bulk_sel) if (b) flt_sel_count++;
                                 ImGui::Text("%d selected", flt_sel_count);
                                 ImGui::SameLine();
                                 char flt_del_label[64];
-                                snprintf(flt_del_label, sizeof(flt_del_label), "Delete (%d)###fbdel", flt_sel_count);
+                                snprintf(flt_del_label, sizeof(flt_del_label), "Delete (%d)###fsel_del", flt_sel_count);
                                 if (ImGui::Button(flt_del_label, ImVec2(110, 0))) {
                                         std::vector<int> to_delete;
-                                        for (int j = 0; j < (int)s_flt_bulk_delete_sel.size(); j++)
-                                                if (s_flt_bulk_delete_sel[j] && j < (int)s_flt_indices.size())
+                                        for (int j = 0; j < (int)s_flt_bulk_sel.size(); j++)
+                                                if (s_flt_bulk_sel[j] && j < (int)s_flt_indices.size())
                                                         to_delete.push_back(s_flt_indices[j]);
                                         std::sort(to_delete.begin(), to_delete.end(), std::greater<int>());
                                         to_delete.erase(std::unique(to_delete.begin(), to_delete.end()), to_delete.end());
                                         for (int idx : to_delete)
                                                 delete_chat_line(idx);
-                                        s_flt_bulk_delete_mode = false;
-                                        s_flt_bulk_delete_sel.clear();
+                                        s_flt_bulk_select_mode = false;
+                                        s_flt_bulk_sel.clear();
                                 }
                                 ImGui::SameLine();
-                                if (ImGui::Button("Cancel##fbdel", ImVec2(70, 0))) {
-                                        s_flt_bulk_delete_mode = false;
-                                        s_flt_bulk_delete_sel.clear();
-                                }
-                                ImGui::SameLine();
-                                if (ImGui::Button("All##fbdel", ImVec2(50, 0)))
-                                        for (auto &&b : s_flt_bulk_delete_sel) b = true;
-                                ImGui::SameLine();
-                                if (ImGui::Button("None##fbdel", ImVec2(55, 0)))
-                                        for (auto &&b : s_flt_bulk_delete_sel) b = false;
-                        } else if (s_flt_bulk_export_mode) {
-                                int flt_exp_count = 0;
-                                for (bool b : s_flt_bulk_export_sel) if (b) flt_exp_count++;
-                                ImGui::Text("%d selected", flt_exp_count);
-                                ImGui::SameLine();
-                                char flt_exp_label[64];
-                                snprintf(flt_exp_label, sizeof(flt_exp_label), "Export PNG (%d)###fbexp", flt_exp_count);
-                                if (ImGui::Button(flt_exp_label, ImVec2(130, 0))) {
+                                if (ImGui::Button("Export PNG###fsel_exp", ImVec2(95, 0))) {
                                         std::vector<ChatLine> sel_lines;
-                                        for (int j = 0; j < (int)s_flt_bulk_export_sel.size(); j++)
-                                                if (s_flt_bulk_export_sel[j] && j < (int)s_flt_indices.size())
+                                        for (int j = 0; j < (int)s_flt_bulk_sel.size(); j++)
+                                                if (s_flt_bulk_sel[j] && j < (int)s_flt_indices.size())
                                                         sel_lines.push_back(s_chat[s_flt_indices[j]]);
                                         do_export_png(w, sel_lines);
-                                        s_flt_bulk_export_mode = false;
-                                        s_flt_bulk_export_sel.clear();
+                                        s_flt_bulk_select_mode = false;
+                                        s_flt_bulk_sel.clear();
                                 }
                                 ImGui::SameLine();
-                                if (ImGui::Button("Cancel##fbexp", ImVec2(70, 0))) {
-                                        s_flt_bulk_export_mode = false;
-                                        s_flt_bulk_export_sel.clear();
+                                if (ImGui::Button("Cancel##fsel", ImVec2(70, 0))) {
+                                        s_flt_bulk_select_mode = false;
+                                        s_flt_bulk_sel.clear();
                                 }
                                 ImGui::SameLine();
-                                if (ImGui::Button("All##fbexp", ImVec2(50, 0)))
-                                        for (auto &&b : s_flt_bulk_export_sel) b = true;
+                                if (ImGui::Button("All##fsel", ImVec2(50, 0)))
+                                        for (auto &&b : s_flt_bulk_sel) b = true;
                                 ImGui::SameLine();
-                                if (ImGui::Button("None##fbexp", ImVec2(55, 0)))
-                                        for (auto &&b : s_flt_bulk_export_sel) b = false;
+                                if (ImGui::Button("None##fsel", ImVec2(55, 0)))
+                                        for (auto &&b : s_flt_bulk_sel) b = false;
                         } else {
                                 ImGui::Text("%u characters and %u lines", (unsigned)s_flt_chars, (unsigned)s_flt_indices.size());
                                 ImGui::SameLine();

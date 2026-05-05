@@ -24,6 +24,9 @@ void config_load(void) {
         char ini[MAX_PATH];
         get_ini_path(ini, MAX_PATH);
         g_config.remove_timestamps = GetPrivateProfileIntA("General", "RemoveTimestamps", 0, ini);
+        g_config.wrap_width = GetPrivateProfileIntA("General", "WrapWidth", 500, ini);
+        if (g_config.wrap_width < 100) g_config.wrap_width = 100;
+        if (g_config.wrap_width > 2000) g_config.wrap_width = 2000;
 }
 
 void config_save(void) {
@@ -32,4 +35,6 @@ void config_save(void) {
         char buf[16];
         snprintf(buf, sizeof(buf), "%d", g_config.remove_timestamps);
         WritePrivateProfileStringA("General", "RemoveTimestamps", buf, ini);
+        snprintf(buf, sizeof(buf), "%d", g_config.wrap_width);
+        WritePrivateProfileStringA("General", "WrapWidth", buf, ini);
 }

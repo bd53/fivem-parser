@@ -8,6 +8,7 @@ extern "C" {
 
 typedef struct {
         int remove_timestamps;
+        int wrap_width;
 } Config;
 
 extern Config g_config;
