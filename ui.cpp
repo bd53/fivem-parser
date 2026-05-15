@@ -319,8 +319,8 @@ void ui_shutdown(void) {
 
 void ui_render(GLFWwindow *w) {
         if (s_live_mode && scanner_is_running()) {
-                ScannedMsg msgs[32];
-                int n = scanner_poll(msgs, 32);
+                ScannedMsg msgs[64];
+                int n = scanner_poll(msgs, 64);
                 if (n > 0) {
                         SYSTEMTIME st;
                         GetLocalTime(&st);
@@ -534,6 +534,23 @@ void ui_render(GLFWwindow *w) {
                         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.2f, 0.2f, 1.0f));
                         if (ImGui::Button("STOP", ImVec2(bw, 0))) {
                                 scanner_stop();
+                                ScannedMsg drain[64];
+                                int dn;
+                                while ((dn = scanner_poll(drain, 64)) > 0) {
+                                        SYSTEMTIME st;
+                                        GetLocalTime(&st);
+                                        char ts[16];
+                                        snprintf(ts, sizeof(ts), "[%02d:%02d:%02d]", st.wHour, st.wMinute, st.wSecond);
+                                        for (int di = 0; di < dn; di++) {
+                                                ChatLine cl;
+                                                cl.timestamp = ts;
+                                                cl.raw = drain[di].raw;
+                                                cl.plain = drain[di].plain;
+                                                cl.segments = parse_segments(drain[di].raw);
+                                                s_total_chars += strlen(drain[di].plain) + 3;
+                                                s_chat.push_back(std::move(cl));
+                                        }
+                                }
                                 s_live_mode = false;
                         }
                         ImGui::PopStyleColor(2);
