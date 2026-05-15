@@ -13,7 +13,7 @@ extern "C" {
 void ui_init(GLFWwindow *window);
 void ui_render(GLFWwindow *window);
 void ui_shutdown(void);
-bool ui_get_remove_timestamps(void);
+bool ui_get_show_timestamps(void);
 
 #define MUTEX_NAME "ChatParser_SingleInstance"
 
@@ -68,7 +68,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
                 ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
                 glfwSwapBuffers(window);
         }
-        g_config.remove_timestamps = ui_get_remove_timestamps() ? 1 : 0;
+        g_config.show_timestamps = ui_get_show_timestamps() ? 1 : 0;
         config_save();
         ui_shutdown();
         ImGui_ImplOpenGL3_Shutdown();

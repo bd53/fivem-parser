@@ -108,7 +108,7 @@ static int measure_string_width(stbtt_fontinfo *font, float scale, const char *t
         return w;
 }
 
-bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines, int wrap_width, bool show_timestamps, float bg_r, float bg_g, float bg_b, float bg_a) {
+bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines, int wrap_width, float bg_r, float bg_g, float bg_b, float bg_a) {
         if (lines.empty()) return false;
         std::vector<unsigned char> font_data;
         if (!load_font_file(font_data)) return false;
@@ -123,10 +123,6 @@ bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines
         int max_w = 64;
         for (const ChatLine &cl : lines) {
                 int w = 0;
-                if (show_timestamps && !cl.timestamp.empty()) {
-                        std::string ts = cl.timestamp + " ";
-                        w += measure_string_width(&font, scale, ts.c_str(), (int)ts.size());
-                }
                 for (const ColorSeg &seg : cl.segments)
                         w += measure_string_width(&font, scale, seg.text.c_str(), (int)seg.text.size());
                 if (w > max_w) max_w = w;
@@ -153,17 +149,14 @@ bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines
                                 p = word_end;
                         }
                 };
-                if (show_timestamps && !cl.timestamp.empty()) {
-                        std::string ts = cl.timestamp + " ";
-                        count_span(ts.c_str(), (int)ts.size());
-                }
                 for (const ColorSeg &seg : cl.segments)
                         count_span(seg.text.c_str(), (int)seg.text.size());
                 total_rows += rows;
         }
         int img_w = content_w + PAD_X * 2 + OUTLINE_R * 2;
         int img_h = total_rows * line_h + PAD_Y * 2 + OUTLINE_R * 2;
-        std::vector<unsigned char> pixels((size_t)(img_w * img_h * 4), 0);
+        if (img_h > 32000) return false;
+        std::vector<unsigned char> pixels((size_t)img_w * (size_t)img_h * 4, 0);
         if (bg_a > 0.001f) {
                 unsigned char br = (unsigned char)(bg_r * 255.0f + 0.5f);
                 unsigned char bg = (unsigned char)(bg_g * 255.0f + 0.5f);
@@ -198,10 +191,6 @@ bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines
                                 p = word_end;
                         }
                 };
-                if (show_timestamps && !cl.timestamp.empty()) {
-                        std::string ts = cl.timestamp + " ";
-                        render_span(ts.c_str(), (int)ts.size(), 0.55f, 0.55f, 0.55f);
-                }
                 for (const ColorSeg &seg : cl.segments)
                         render_span(seg.text.c_str(), (int)seg.text.size(), seg.color.x, seg.color.y, seg.color.z);
                 pen_y += line_h;

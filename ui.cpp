@@ -16,12 +16,11 @@ extern "C" {
 #include "resource.h"
 #include "parser.h"
 #include "util.h"
+#include "scanner.h"
 }
 
 #include "chat.h"
 
-static char s_path[MAX_PATH * 2] = "";
-static bool s_remove_ts = false;
 
 static std::vector<ChatLine> s_chat;
 static size_t s_total_chars = 0;
@@ -35,7 +34,6 @@ static std::string s_regex_error;
 
 static bool s_open_about = false;
 
-static int s_pending_delete = -1;
 static int s_edit_line = -1;
 static bool s_open_edit_popup = false;
 static char s_edit_buf[1024] = "";
@@ -53,8 +51,9 @@ static char s_find_buf[256] = "";
 static int s_find_result = -1;
 static bool s_find_need_scroll = false;
 
-static char s_flt_ts_start[16] = "";
-static char s_flt_ts_end[16] = "";
+static bool s_show_ts = true;
+static bool s_live_mode = false;
+static bool s_live_scroll = false;
 
 static void render_chat_line(const ChatLine &line) {
         ImFont *font = ImGui::GetFont();
@@ -69,7 +68,8 @@ static void render_chat_line(const ChatLine &line) {
         const float max_x = start_x + wrap_limit;
         const ImVec2 win_pos = ImGui::GetWindowPos();
         const float win_h = ImGui::GetWindowHeight();
-        const bool should_draw = (item_pos.y < win_pos.y + win_h + line_h) && (item_pos.y > win_pos.y - line_h);
+        const float cull_margin = 300.0f;
+        const bool should_draw = (item_pos.y < win_pos.y + win_h + cull_margin) && (item_pos.y > win_pos.y - cull_margin);
         ImDrawList *dl = should_draw ? ImGui::GetWindowDrawList() : nullptr;
         float pen_x = start_x;
         float pen_y = item_pos.y;
@@ -94,7 +94,7 @@ static void render_chat_line(const ChatLine &line) {
                         p = word_end;
                 }
         };
-        if (!s_remove_ts && !line.timestamp.empty()) {
+        if (s_show_ts && !line.timestamp.empty()) {
                 std::string ts = line.timestamp + " ";
                 process_span(ts.c_str(), IM_COL32(140, 140, 140, 255));
         }
@@ -107,7 +107,7 @@ static std::string build_plain(const std::vector<ChatLine> &lines) {
         std::string out;
         out.reserve(s_total_chars);
         for (auto &l : lines) {
-                if (!s_remove_ts && !l.timestamp.empty()) { out += l.timestamp; out += ' '; }
+                if (s_show_ts && !l.timestamp.empty()) { out += l.timestamp; out += ' '; }
                 out += l.plain;
                 out += "\r\n";
         }
@@ -119,7 +119,7 @@ static std::string build_plain_indices(const std::vector<int> &indices) {
         out.reserve(s_flt_chars);
         for (int idx : indices) {
                 auto &l = s_chat[idx];
-                if (!s_remove_ts && !l.timestamp.empty()) { out += l.timestamp; out += ' '; }
+                if (s_show_ts && !l.timestamp.empty()) { out += l.timestamp; out += ' '; }
                 out += l.plain;
                 out += "\r\n";
         }
@@ -135,14 +135,6 @@ static bool match_line(const char *text, const std::string &kw, bool use_regex, 
                 }
         }
         return stristr(text, kw.c_str()) != NULL;
-}
-
-static int parse_time_secs(const char *s) {
-        if (!s || !s[0]) return -1;
-        int h = 0, m = 0, sec = 0;
-        if (sscanf(s, "%d:%d:%d", &h, &m, &sec) >= 2)
-                return h * 3600 + m * 60 + sec;
-        return -1;
 }
 
 static void apply_filter(void) {
@@ -231,22 +223,8 @@ static void apply_filter(void) {
                         s_flt_indices.push_back(i);
                 }
         }
-        int ts_s = parse_time_secs(s_flt_ts_start);
-        int ts_e = parse_time_secs(s_flt_ts_end);
-        if (ts_s >= 0 || ts_e >= 0) {
-                s_flt_indices.erase(
-                        std::remove_if(s_flt_indices.begin(), s_flt_indices.end(), [&](int idx) {
-                                int t = parse_time_secs(s_chat[idx].timestamp.c_str());
-                                if (t < 0) return false;
-                                if (ts_s >= 0 && t < ts_s) return true;
-                                if (ts_e >= 0 && t > ts_e) return true;
-                                return false;
-                        }),
-                        s_flt_indices.end()
-                );
-        }
         for (int idx : s_flt_indices)
-                s_flt_chars += s_chat[idx].plain.size() + s_chat[idx].timestamp.size() + 3;
+                s_flt_chars += s_chat[idx].plain.size() + 3;
 }
 
 static void delete_chat_line(int idx) {
@@ -254,7 +232,7 @@ static void delete_chat_line(int idx) {
         s_chat.erase(s_chat.begin() + idx);
         s_total_chars = 0;
         for (auto &l : s_chat)
-                s_total_chars += l.plain.size() + l.timestamp.size() + 3;
+                s_total_chars += l.plain.size() + 3;
         for (int j = (int)s_flt_indices.size() - 1; j >= 0; j--) {
                 if (s_flt_indices[j] == idx)
                         s_flt_indices.erase(s_flt_indices.begin() + j);
@@ -263,72 +241,7 @@ static void delete_chat_line(int idx) {
         }
         s_flt_chars = 0;
         for (int k : s_flt_indices)
-                s_flt_chars += s_chat[k].plain.size() + s_chat[k].timestamp.size() + 3;
-}
-
-static void do_find_latest(GLFWwindow *w) {
-        char path[MAX_PATH * 2];
-        if (!find_latest_log(path, sizeof(path))) {
-                MessageBoxA(glfwGetWin32Window(w), "No session found.\n\n" "Expected location:\n" "%LOCALAPPDATA%\\FiveM\\FiveM.app\\logs\\\n\n" "Launch FiveM and join a server first.", "Error", MB_ICONWARNING);
-                return;
-        }
-        snprintf(s_path, sizeof(s_path), "%s", path);
-}
-
-static void do_browse(GLFWwindow *w) {
-        char initdir[MAX_PATH + 32] = "";
-        get_logs_dir(initdir, sizeof(initdir));
-        OPENFILENAMEA ofn = {};
-        char fname[MAX_PATH] = "";
-        ofn.lStructSize = sizeof(ofn);
-        ofn.hwndOwner = glfwGetWin32Window(w);
-        ofn.lpstrFilter = "Session\0CitizenFX_log_*.log\0" "All Log Files\0*.log\0" "All Files\0*.*\0";
-        ofn.lpstrFile = fname;
-        ofn.nMaxFile = MAX_PATH;
-        ofn.Flags = OFN_FILEMUSTEXIST;
-        ofn.lpstrTitle = "Select Session";
-        ofn.lpstrInitialDir = initdir[0] ? initdir : NULL;
-        if (GetOpenFileNameA(&ofn))
-                snprintf(s_path, sizeof(s_path), "%s", fname);
-}
-
-static void do_parse(GLFWwindow *w) {
-        if (!s_path[0]) {
-                MessageBoxA(glfwGetWin32Window(w), "Please select or auto-detect a log file first.", "Error", MB_ICONWARNING);
-                return;
-        }
-        ChatLog *log = parse_log_chat(s_path, 0);
-        if (!log) {
-                MessageBoxA(glfwGetWin32Window(w), "Failed to open log file.\n\n" "Make sure FiveM has been launched at least once " "and the file exists at the specified path.", "Error", MB_ICONERROR);
-                return;
-        }
-        std::vector<ChatLine> tmp;
-        tmp.reserve((size_t)log->count);
-        s_total_chars = 0;
-        for (int i = 0; i < log->count; i++) {
-                ChatEntry *e = &log->entries[i];
-                ChatLine cl;
-                cl.timestamp = e->timestamp;
-                cl.raw = e->raw;
-                cl.plain = e->plain;
-                cl.segments = parse_segments(e->raw);
-                s_total_chars += strlen(e->plain) + strlen(e->timestamp) + 3;
-                tmp.push_back(std::move(cl));
-        }
-        chatlog_free(log);
-        s_chat = std::move(tmp);
-        s_bulk_select_mode = false;
-        s_bulk_sel.clear();
-        s_find_result = -1;
-        s_flt_indices.clear();
-        s_flt_indices.shrink_to_fit();
-        s_flt_chars = 0;
-        if (s_show_filter) {
-                s_flt_indices.reserve(s_chat.size());
-                for (int i = 0; i < (int)s_chat.size(); i++)
-                        s_flt_indices.push_back(i);
-                s_flt_chars = s_total_chars;
-        }
+                s_flt_chars += s_chat[k].plain.size() + 3;
 }
 
 static void do_save(GLFWwindow *w, const std::string &text, const char *default_name) {
@@ -379,7 +292,7 @@ static void do_export_png(GLFWwindow *w, const std::vector<ChatLine> &lines) {
         ofn.Flags = OFN_OVERWRITEPROMPT;
         ofn.lpstrDefExt = "png";
         if (!GetSaveFileNameA(&ofn)) return;
-        if (export_chat_png(fname, lines, g_config.wrap_width, !s_remove_ts, s_png_bg[0], s_png_bg[1], s_png_bg[2], s_png_bg[3])) {
+        if (export_chat_png(fname, lines, g_config.wrap_width, s_png_bg[0], s_png_bg[1], s_png_bg[2], s_png_bg[3])) {
                 MessageBoxA(glfwGetWin32Window(w), "PNG exported successfully.", "Exported", MB_ICONINFORMATION);
         } else {
                 MessageBoxA(glfwGetWin32Window(w), "Failed to export PNG.\n\nArial font was not found on this system.", "Error", MB_ICONERROR);
@@ -388,23 +301,43 @@ static void do_export_png(GLFWwindow *w, const std::vector<ChatLine> &lines) {
 
 void ui_init(GLFWwindow *w) {
         (void)w;
-        s_remove_ts = (g_config.remove_timestamps != 0);
+        s_show_ts = (g_config.show_timestamps != 0);
         s_png_bg[0] = g_config.png_bg_r / 255.0f;
         s_png_bg[1] = g_config.png_bg_g / 255.0f;
         s_png_bg[2] = g_config.png_bg_b / 255.0f;
         s_png_bg[3] = g_config.png_bg_a / 255.0f;
-        char path[MAX_PATH * 2];
-        if (find_latest_log(path, sizeof(path)))
-                snprintf(s_path, sizeof(s_path), "%s", path);
 }
 
-bool ui_get_remove_timestamps(void) {
-        return s_remove_ts;
+bool ui_get_show_timestamps(void) {
+        return s_show_ts;
 }
 
-void ui_shutdown(void) {}
+void ui_shutdown(void) {
+        if (scanner_is_running())
+                scanner_stop();
+}
 
 void ui_render(GLFWwindow *w) {
+        if (s_live_mode && scanner_is_running()) {
+                ScannedMsg msgs[32];
+                int n = scanner_poll(msgs, 32);
+                if (n > 0) {
+                        SYSTEMTIME st;
+                        GetLocalTime(&st);
+                        char ts[16];
+                        snprintf(ts, sizeof(ts), "[%02d:%02d:%02d]", st.wHour, st.wMinute, st.wSecond);
+                        for (int i = 0; i < n; i++) {
+                                ChatLine cl;
+                                cl.timestamp = ts;
+                                cl.raw = msgs[i].raw;
+                        cl.plain = msgs[i].plain;
+                        cl.segments = parse_segments(msgs[i].raw);
+                        s_total_chars += strlen(msgs[i].plain) + 3;
+                        s_chat.push_back(std::move(cl));
+                        s_live_scroll = true;
+                        }
+                }
+        }
         ImGuiViewport *vp = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(vp->Pos);
         ImGui::SetNextWindowSize(vp->Size);
@@ -425,19 +358,6 @@ void ui_render(GLFWwindow *w) {
                         s_open_about = true;
                 ImGui::EndMenuBar();
         }
-        ImGui::Text("Log File:");
-        ImGui::SameLine();
-        float avail = ImGui::GetContentRegionAvail().x;
-        float browse_w = 75, find_w = 85;
-        float path_offset = browse_w + find_w + ImGui::GetStyle().ItemSpacing.x * 2;
-        ImGui::SetNextItemWidth(avail - path_offset);
-        ImGui::InputText("##path", s_path, sizeof(s_path));
-        ImGui::SameLine();
-        if (ImGui::Button("Browse", ImVec2(75, 0)))
-                do_browse(w);
-        ImGui::SameLine();
-        if (ImGui::Button("Find Latest", ImVec2(85, 0)))
-                do_find_latest(w);
         {
                 ImGuiIO &io = ImGui::GetIO();
                 if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
@@ -522,11 +442,11 @@ void ui_render(GLFWwindow *w) {
                         ImGui::PopID();
                 }
         }
-        ImGui::EndChild();
-        if (s_pending_delete >= 0) {
-                delete_chat_line(s_pending_delete);
-                s_pending_delete = -1;
+        if (s_live_scroll) {
+                ImGui::SetScrollHereY(1.0f);
+                s_live_scroll = false;
         }
+        ImGui::EndChild();
         if (s_open_edit_popup) {
                 ImGui::OpenPopup("Edit Line");
                 s_open_edit_popup = false;
@@ -543,9 +463,9 @@ void ui_render(GLFWwindow *w) {
                                 cl.plain.clear();
                                 for (auto &seg : cl.segments) cl.plain += seg.text;
                                 s_total_chars = 0;
-                                for (auto &l : s_chat) s_total_chars += l.plain.size() + l.timestamp.size() + 3;
+                                for (auto &l : s_chat) s_total_chars += l.plain.size() + 3;
                                 s_flt_chars = 0;
-                                for (int k : s_flt_indices) s_flt_chars += s_chat[k].plain.size() + s_chat[k].timestamp.size() + 3;
+                                for (int k : s_flt_indices) s_flt_chars += s_chat[k].plain.size() + 3;
                         }
                         s_edit_line = -1;
                         ImGui::CloseCurrentPopup();
@@ -591,8 +511,11 @@ void ui_render(GLFWwindow *w) {
                 if (ImGui::Button("None##bsel", ImVec2(55, 0)))
                         for (auto &&b : s_bulk_sel) b = false;
         } else {
-                ImGui::Text("%u characters  |  %u messages", (unsigned)s_total_chars, (unsigned)s_chat.size());
-                ImGui::Checkbox("Remove timestamps", &s_remove_ts);
+                if (s_live_mode)
+                        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "LIVE  %u messages", (unsigned)s_chat.size());
+                else
+                        ImGui::Text("%u characters  |  %u messages", (unsigned)s_total_chars, (unsigned)s_chat.size());
+                ImGui::Checkbox("Timestamps", &s_show_ts);
                 ImGui::SameLine();
                 ImGui::Text("Wrap:");
                 ImGui::SameLine();
@@ -606,8 +529,29 @@ void ui_render(GLFWwindow *w) {
                 float sp = ImGui::GetStyle().ItemSpacing.x;
                 float total = bw * 3 + bw_exp + bg_btn + sp * 4;
                 ImGui::SameLine(ImGui::GetWindowWidth() - total - ImGui::GetStyle().WindowPadding.x);
-                if (ImGui::Button("PARSE", ImVec2(bw, 0)))
-                        do_parse(w);
+                if (s_live_mode) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.2f, 0.2f, 1.0f));
+                        if (ImGui::Button("STOP", ImVec2(bw, 0))) {
+                                scanner_stop();
+                                s_live_mode = false;
+                        }
+                        ImGui::PopStyleColor(2);
+                } else {
+                        if (ImGui::Button("LIVE", ImVec2(bw, 0))) {
+                                s_chat.clear();
+                                s_total_chars = 0;
+                                s_bulk_select_mode = false;
+                                s_bulk_sel.clear();
+                                s_find_result = -1;
+                                s_flt_indices.clear();
+                                s_flt_chars = 0;
+                                if (scanner_start())
+                                        s_live_mode = true;
+                                else
+                                        MessageBoxA(glfwGetWin32Window(w), "Failed to start scanner.", "Error", MB_ICONERROR);
+                        }
+                }
                 ImGui::SameLine();
                 if (ImGui::Button("SAVE AS", ImVec2(bw, 0))) {
                         std::string plain = build_plain(s_chat);
@@ -648,15 +592,10 @@ void ui_render(GLFWwindow *w) {
                 ImGui::Separator();
                 ImGui::Spacing();
                 ImGui::Text("https://github.com/bd53");
-                ImGui::Text("https://discord.gg/users/colonelfuhrberger");
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
-                float btn_w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
-                if (ImGui::Button("OK", ImVec2(btn_w, 0)))
-                        ImGui::CloseCurrentPopup();
-                ImGui::SameLine();
-                if (ImGui::Button("Close", ImVec2(btn_w, 0)))
+                if (ImGui::Button("OK", ImVec2(ImGui::GetContentRegionAvail().x, 0)))
                         ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
         }
@@ -671,8 +610,6 @@ void ui_render(GLFWwindow *w) {
                         ImGui::SameLine();
                         if (ImGui::Button("CLEAR", ImVec2(90, 0))) {
                                 s_kw_buf[0] = '\0';
-                                s_flt_ts_start[0] = '\0';
-                                s_flt_ts_end[0] = '\0';
                                 s_regex_error.clear();
                                 s_flt_indices.clear();
                                 for (int i = 0; i < (int)s_chat.size(); i++)
@@ -681,17 +618,6 @@ void ui_render(GLFWwindow *w) {
                         }
                         ImGui::SameLine();
                         ImGui::Checkbox("Regex", &s_use_regex);
-                        ImGui::Text("Time:");
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(75);
-                        ImGui::InputText("##ts_start", s_flt_ts_start, sizeof(s_flt_ts_start));
-                        ImGui::SameLine();
-                        ImGui::Text("to");
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(75);
-                        ImGui::InputText("##ts_end", s_flt_ts_end, sizeof(s_flt_ts_end));
-                        ImGui::SameLine();
-                        ImGui::TextDisabled("HH:MM:SS");
                         if (!s_regex_error.empty()) {
                                 ImGui::SameLine();
                                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", s_regex_error.c_str());
@@ -729,10 +655,6 @@ void ui_render(GLFWwindow *w) {
                                 }
                         }
                         ImGui::EndChild();
-                        if (s_pending_delete >= 0) {
-                                delete_chat_line(s_pending_delete);
-                                s_pending_delete = -1;
-                        }
                         if (s_flt_bulk_select_mode) {
                                 int flt_sel_count = 0;
                                 for (bool b : s_flt_bulk_sel) if (b) flt_sel_count++;
