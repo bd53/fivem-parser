@@ -1,12 +1,12 @@
-#include "scanner.h"
-#include "util.h"
+#include <windows.h>
 #include <tlhelp32.h>
+#include "parser.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #define SCAN_INTERVAL_MS 1500
-#define MSG_QUEUE_CAP 1024
+#define MSG_QUEUE_CAP 256
 #define DEDUP_CAP 16384
 #define DEDUP_MASK (DEDUP_CAP - 1)
 #define READ_BUF_SIZE (64 * 1024)
@@ -18,15 +18,17 @@
 #define MAX_REGION_SIZE (32 * 1024 * 1024)
 #define SEED_TIMEOUT_MS 3000
 
+typedef unsigned long long u64;
+
 static HANDLE s_thread;
 static volatile LONG s_running;
 static CRITICAL_SECTION s_cs;
 static int s_cs_init;
 
-static ScannedMsg s_queue[MSG_QUEUE_CAP];
+static ScannedMsg *s_queue;
 static int s_head, s_tail;
 
-static unsigned s_dedup_hash[DEDUP_CAP];
+static u64 s_dedup_hash[DEDUP_CAP];
 static int s_dedup_used[DEDUP_CAP];
 static int s_dedup_count;
 static volatile LONG s_seeded;
@@ -38,7 +40,7 @@ static int s_hot_count;
 #define PASS_DEDUP_CAP 512
 #define PASS_DEDUP_MASK (PASS_DEDUP_CAP - 1)
 
-static unsigned s_pass_hash[PASS_DEDUP_CAP];
+static u64 s_pass_hash[PASS_DEDUP_CAP];
 static int s_pass_used[PASS_DEDUP_CAP];
 static int s_pass_count;
 
@@ -48,13 +50,13 @@ static void pass_dedup_clear(void) {
 }
 
 static int pass_check_and_mark(const char *text, int len) {
-        unsigned h = 2166136261u;
+        u64 h = 14695981039346656037ULL;
         for (int i = 0; i < len; i++) {
                 h ^= (unsigned char)text[i];
-                h *= 16777619u;
+                h *= 1099511628211ULL;
         }
         if (h == 0) h = 1;
-        unsigned idx = h & PASS_DEDUP_MASK;
+        unsigned idx = (unsigned)h & PASS_DEDUP_MASK;
         for (;;) {
                 if (!s_pass_used[idx]) {
                         if (s_pass_count >= PASS_DEDUP_CAP * 3 / 4) return 0;
@@ -68,23 +70,29 @@ static int pass_check_and_mark(const char *text, int len) {
         }
 }
 
-static unsigned fnv1a(const char *data, int len, size_t addr) {
-        unsigned h = 2166136261u;
-        for (int i = 0; i < sizeof(addr); i++) {
+static u64 fnv1a(const char *data, int len, size_t addr) {
+        u64 h = 14695981039346656037ULL;
+        for (size_t i = 0; i < sizeof(addr); i++) {
                 h ^= (unsigned char)(addr >> (i * 8));
-                h *= 16777619u;
+                h *= 1099511628211ULL;
         }
         for (int i = 0; i < len; i++) {
                 h ^= (unsigned char)data[i];
-                h *= 16777619u;
+                h *= 1099511628211ULL;
         }
         return h;
 }
 
+static void dedup_clear(void) {
+        memset(s_dedup_hash, 0, sizeof(s_dedup_hash));
+        memset(s_dedup_used, 0, sizeof(s_dedup_used));
+        s_dedup_count = 0;
+}
+
 static int is_seen(const char *text, int len, size_t addr) {
-        unsigned h = fnv1a(text, len, addr);
+        u64 h = fnv1a(text, len, addr);
         if (h == 0) h = 1;
-        unsigned idx = h & DEDUP_MASK;
+        unsigned idx = (unsigned)h & DEDUP_MASK;
         EnterCriticalSection(&s_cs);
         for (;;) {
                 if (!s_dedup_used[idx]) {
@@ -100,15 +108,15 @@ static int is_seen(const char *text, int len, size_t addr) {
 }
 
 static void mark_seen(const char *text, int len, size_t addr) {
-        unsigned h = fnv1a(text, len, addr);
+        u64 h = fnv1a(text, len, addr);
         if (h == 0) h = 1;
-        unsigned idx = h & DEDUP_MASK;
+        unsigned idx = (unsigned)h & DEDUP_MASK;
         EnterCriticalSection(&s_cs);
         for (;;) {
                 if (!s_dedup_used[idx]) {
                         if (s_dedup_count >= DEDUP_CAP * 3 / 4) {
-                                LeaveCriticalSection(&s_cs);
-                                return;
+                                dedup_clear();
+                                idx = (unsigned)h & DEDUP_MASK;
                         }
                         s_dedup_hash[idx] = h;
                         s_dedup_used[idx] = 1;
@@ -126,6 +134,10 @@ static void mark_seen(const char *text, int len, size_t addr) {
 
 static int enqueue(const ScannedMsg *msg) {
         EnterCriticalSection(&s_cs);
+        if (!s_queue) {
+                LeaveCriticalSection(&s_cs);
+                return 0;
+        }
         int next = (s_head + 1) % MSG_QUEUE_CAP;
         if (next != s_tail) {
                 s_queue[s_head] = *msg;
@@ -154,6 +166,51 @@ static const unsigned char *find_bytes(const unsigned char *hay, size_t hay_len,
         return NULL;
 }
 
+static int decode_hex4(const char *p, const char *end, unsigned *out) {
+        if (p + 4 > end) return 0;
+        unsigned cp = 0;
+        for (int k = 0; k < 4; k++) {
+                char c = p[k];
+                cp <<= 4;
+                if (c >= '0' && c <= '9') cp |= (unsigned)(c - '0');
+                else if (c >= 'a' && c <= 'f') cp |= (unsigned)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') cp |= (unsigned)(c - 'A' + 10);
+                else return 0;
+        }
+        *out = cp;
+        return 1;
+}
+
+static int encode_utf8(unsigned cp, char *out, int max) {
+        if (cp < 0x80) {
+                if (max < 1) return 0;
+                out[0] = (char)cp;
+                return 1;
+        }
+        if (cp < 0x800) {
+                if (max < 2) return 0;
+                out[0] = (char)(0xC0 | (cp >> 6));
+                out[1] = (char)(0x80 | (cp & 0x3F));
+                return 2;
+        }
+        if (cp < 0x10000) {
+                if (max < 3) return 0;
+                out[0] = (char)(0xE0 | (cp >> 12));
+                out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                out[2] = (char)(0x80 | (cp & 0x3F));
+                return 3;
+        }
+        if (cp < 0x110000) {
+                if (max < 4) return 0;
+                out[0] = (char)(0xF0 | (cp >> 18));
+                out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                out[3] = (char)(0x80 | (cp & 0x3F));
+                return 4;
+        }
+        return 0;
+}
+
 static const char *extract_json_string(const char *p, const char *end, char *out, int out_sz) {
         if (p >= end || *p != '"') return NULL;
         p++;
@@ -168,9 +225,23 @@ static const char *extract_json_string(const char *p, const char *end, char *out
                         case 'n': if (j < out_sz - 1) out[j++] = '\n'; break;
                         case 't': if (j < out_sz - 1) out[j++] = '\t'; break;
                         case 'r': if (j < out_sz - 1) out[j++] = '\r'; break;
-                        case 'u':
-                                if (p + 4 < end) p += 4;
+                        case 'b': if (j < out_sz - 1) out[j++] = '\b'; break;
+                        case 'f': if (j < out_sz - 1) out[j++] = '\f'; break;
+                        case 'u': {
+                                unsigned cp = 0;
+                                if (!decode_hex4(p + 1, end, &cp)) break;
+                                p += 4;
+                                if (cp >= 0xD800 && cp <= 0xDBFF && p + 2 < end && p[1] == '\\' && p[2] == 'u') {
+                                        unsigned lo = 0;
+                                        if (decode_hex4(p + 3, end, &lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                                p += 6;
+                                        }
+                                }
+                                int n = encode_utf8(cp, out + j, out_sz - 1 - j);
+                                j += n;
                                 break;
+                        }
                         default:
                                 if (j < out_sz - 1) out[j++] = *p;
                                 break;
@@ -386,10 +457,11 @@ int scanner_start(void) {
                 CloseHandle(s_thread);
                 s_thread = NULL;
         }
+        free(s_queue);
+        s_queue = (ScannedMsg *)calloc(MSG_QUEUE_CAP, sizeof(ScannedMsg));
+        if (!s_queue) return 0;
         s_head = s_tail = 0;
-        memset(s_dedup_hash, 0, sizeof(s_dedup_hash));
-        memset(s_dedup_used, 0, sizeof(s_dedup_used));
-        s_dedup_count = 0;
+        dedup_clear();
         pass_dedup_clear();
         s_hot_count = 0;
         s_seed_start = GetTickCount();
@@ -398,6 +470,8 @@ int scanner_start(void) {
         s_thread = CreateThread(NULL, 0, scanner_thread, NULL, 0, NULL);
         if (!s_thread) {
                 InterlockedExchange(&s_running, 0);
+                free(s_queue);
+                s_queue = NULL;
                 return 0;
         }
         return 1;
@@ -409,6 +483,8 @@ void scanner_stop(void) {
         WaitForSingleObject(s_thread, 5000);
         CloseHandle(s_thread);
         s_thread = NULL;
+        free(s_queue);
+        s_queue = NULL;
 }
 
 int scanner_is_running(void) {
@@ -419,7 +495,7 @@ int scanner_poll(ScannedMsg *out, int max_count) {
         if (!s_cs_init) return 0;
         int count = 0;
         EnterCriticalSection(&s_cs);
-        while (count < max_count && s_tail != s_head) {
+        while (count < max_count && s_queue && s_tail != s_head) {
                 out[count++] = s_queue[s_tail];
                 s_tail = (s_tail + 1) % MSG_QUEUE_CAP;
         }

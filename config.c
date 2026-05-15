@@ -1,4 +1,4 @@
-#include "resource.h"
+#include <windows.h>
 #include "parser.h"
 #include <stdio.h>
 #include <string.h>

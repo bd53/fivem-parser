@@ -2,7 +2,7 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_image_write.h"
 #include "stb_truetype.h"
-#include "chat.h"
+#include "parser.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +10,7 @@
 #include <cmath>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 static const float FONT_SIZE = 14.0f;
 static const int PAD_X = 10;
@@ -27,11 +28,48 @@ static bool load_font_file(std::vector<unsigned char> &buf) {
                 fseek(f, 0, SEEK_SET);
                 if (sz <= 0) { fclose(f); continue; }
                 buf.resize((size_t)sz);
-                fread(buf.data(), 1, (size_t)sz, f);
+                size_t read_n = fread(buf.data(), 1, (size_t)sz, f);
                 fclose(f);
+                if ((long)read_n != sz) { buf.clear(); continue; }
                 return true;
         }
         return false;
+}
+
+struct CachedGlyph {
+        unsigned char *bmp;
+        int bw, bh, bx0, by0;
+};
+
+static std::unordered_map<int, CachedGlyph> s_glyph_cache;
+
+static const CachedGlyph *get_glyph(stbtt_fontinfo *font, float scale, int codepoint) {
+        auto it = s_glyph_cache.find(codepoint);
+        if (it != s_glyph_cache.end())
+                return &it->second;
+        CachedGlyph g;
+        stbtt_GetCodepointBitmapBox(font, codepoint, scale, scale, &g.bx0, &g.by0, nullptr, nullptr);
+        int bx1, by1;
+        stbtt_GetCodepointBitmapBox(font, codepoint, scale, scale, &g.bx0, &g.by0, &bx1, &by1);
+        g.bw = bx1 - g.bx0;
+        g.bh = by1 - g.by0;
+        if (g.bw <= 0 || g.bh <= 0) {
+                g.bmp = nullptr;
+                g.bw = 0;
+                g.bh = 0;
+        } else {
+                g.bmp = (unsigned char *)malloc((size_t)(g.bw * g.bh));
+                if (g.bmp)
+                        stbtt_MakeCodepointBitmap(font, g.bmp, g.bw, g.bh, g.bw, scale, scale, codepoint);
+        }
+        auto ins = s_glyph_cache.insert({codepoint, g});
+        return &ins.first->second;
+}
+
+static void free_glyph_cache(void) {
+        for (auto &kv : s_glyph_cache)
+                free(kv.second.bmp);
+        s_glyph_cache.clear();
 }
 
 static inline void composite_pixel(unsigned char *dst, float sr, float sg, float sb, float sa) {
@@ -45,27 +83,20 @@ static inline void composite_pixel(unsigned char *dst, float sr, float sg, float
 }
 
 static void render_glyph(unsigned char *img, int img_w, int img_h, int px, int py, int codepoint, float r, float g, float b, float alpha_mul, stbtt_fontinfo *font, float scale, int ascent) {
-        int bx0, by0, bx1, by1;
-        stbtt_GetCodepointBitmapBox(font, codepoint, scale, scale, &bx0, &by0, &bx1, &by1);
-        int bw = bx1 - bx0;
-        int bh = by1 - by0;
-        if (bw <= 0 || bh <= 0) return;
-        unsigned char *bmp = (unsigned char *)malloc((size_t)(bw * bh));
-        if (!bmp) return;
-        stbtt_MakeCodepointBitmap(font, bmp, bw, bh, bw, scale, scale, codepoint);
-        int dst_x = px + bx0;
-        int dst_y = py + ascent + by0;
-        for (int gy = 0; gy < bh; gy++) {
-                for (int gx = 0; gx < bw; gx++) {
+        const CachedGlyph *gl = get_glyph(font, scale, codepoint);
+        if (!gl || !gl->bmp) return;
+        int dst_x = px + gl->bx0;
+        int dst_y = py + ascent + gl->by0;
+        for (int gy = 0; gy < gl->bh; gy++) {
+                for (int gx = 0; gx < gl->bw; gx++) {
                         int fx = dst_x + gx;
                         int fy = dst_y + gy;
                         if (fx < 0 || fx >= img_w || fy < 0 || fy >= img_h) continue;
-                        float a = (bmp[gy * bw + gx] / 255.0f) * alpha_mul;
+                        float a = (gl->bmp[gy * gl->bw + gx] / 255.0f) * alpha_mul;
                         if (a < 0.004f) continue;
                         composite_pixel(img + (fy * img_w + fx) * 4, r, g, b, a);
                 }
         }
-        free(bmp);
 }
 
 static void render_string(unsigned char *img, int img_w, int img_h, int *pen_x, int pen_y, const char *text, int len, float r, float g, float b, float alpha_mul, stbtt_fontinfo *font, float scale, int ascent) {
@@ -155,19 +186,23 @@ bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines
         }
         int img_w = content_w + PAD_X * 2 + OUTLINE_R * 2;
         int img_h = total_rows * line_h + PAD_Y * 2 + OUTLINE_R * 2;
-        if (img_h > 32000) return false;
-        std::vector<unsigned char> pixels((size_t)img_w * (size_t)img_h * 4, 0);
+        if (img_h > 32000 || img_w > 32000) return false;
+        size_t pixel_count = (size_t)img_w * (size_t)img_h;
+        if (pixel_count > 64 * 1024 * 1024) return false;
+        std::vector<unsigned char> pixels;
+        try {
+                pixels.resize(pixel_count * 4, 0);
+        } catch (...) {
+                return false;
+        }
         if (bg_a > 0.001f) {
                 unsigned char br = (unsigned char)(bg_r * 255.0f + 0.5f);
                 unsigned char bg = (unsigned char)(bg_g * 255.0f + 0.5f);
                 unsigned char bb = (unsigned char)(bg_b * 255.0f + 0.5f);
                 unsigned char ba = (unsigned char)(bg_a * 255.0f + 0.5f);
-                for (int j = 0; j < img_w * img_h; j++) {
-                        pixels[j*4+0] = br;
-                        pixels[j*4+1] = bg;
-                        pixels[j*4+2] = bb;
-                        pixels[j*4+3] = ba;
-                }
+                unsigned char tmpl[4] = {br, bg, bb, ba};
+                for (size_t j = 0; j < pixel_count; j++)
+                        memcpy(pixels.data() + j * 4, tmpl, 4);
         }
         const int start_x = PAD_X + OUTLINE_R;
         const int content_right = start_x + content_w;
@@ -195,6 +230,7 @@ bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines
                         render_span(seg.text.c_str(), (int)seg.text.size(), seg.color.x, seg.color.y, seg.color.z);
                 pen_y += line_h;
         }
+        free_glyph_cache();
         int ok = stbi_write_png(output_path, img_w, img_h, 4, pixels.data(), img_w * 4);
         return ok != 0;
 }

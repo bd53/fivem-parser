@@ -5,10 +5,7 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
-extern "C" {
-#include "resource.h"
 #include "parser.h"
-}
 
 void ui_init(GLFWwindow *window);
 void ui_render(GLFWwindow *window);
@@ -24,18 +21,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
                 return 1;
         }
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-                MessageBoxA(NULL, "fivem-parser is already running.", APP_TITLE, MB_ICONINFORMATION);
+                MessageBoxA(NULL, "fivem-parser is already running.", "fivem-parser", MB_ICONINFORMATION);
                 CloseHandle(mutex);
                 return 1;
         }
         if (!glfwInit()) {
-                MessageBoxA(NULL, "Failed to initialize GLFW.", APP_TITLE, MB_ICONERROR);
+                MessageBoxA(NULL, "Failed to initialize GLFW.", "fivem-parser", MB_ICONERROR);
                 CloseHandle(mutex);
                 return 1;
         }
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-        GLFWwindow *window = glfwCreateWindow(800, 500, APP_TITLE " v" APP_VERSION, NULL, NULL);
+        GLFWwindow *window = glfwCreateWindow(800, 500, "fivem-parser v1.1.1", NULL, NULL);
         if (!window) {
                 glfwTerminate();
                 CloseHandle(mutex);
