@@ -48,7 +48,6 @@ static const CachedGlyph *get_glyph(stbtt_fontinfo *font, float scale, int codep
         if (it != s_glyph_cache.end())
                 return &it->second;
         CachedGlyph g;
-        stbtt_GetCodepointBitmapBox(font, codepoint, scale, scale, &g.bx0, &g.by0, nullptr, nullptr);
         int bx1, by1;
         stbtt_GetCodepointBitmapBox(font, codepoint, scale, scale, &g.bx0, &g.by0, &bx1, &by1);
         g.bw = bx1 - g.bx0;
@@ -154,8 +153,8 @@ bool export_chat_png(const char *output_path, const std::vector<ChatLine> &lines
         stbtt_fontinfo font;
         if (!stbtt_InitFont(&font, font_data.data(), 0)) return false;
         float scale = stbtt_ScaleForPixelHeight(&font, font_size);
-        int ascent, descent, line_gap;
-        stbtt_GetFontVMetrics(&font, &ascent, &descent, &line_gap);
+        int ascent, descent;
+        stbtt_GetFontVMetrics(&font, &ascent, &descent, nullptr);
         int scaled_ascent  = (int)ceilf(ascent * scale);
         int scaled_descent = (int)ceilf(-descent * scale);
         int line_h = scaled_ascent + scaled_descent + line_spacing;

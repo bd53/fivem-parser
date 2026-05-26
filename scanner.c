@@ -1,6 +1,7 @@
+#include "parser.h"
+
 #include <windows.h>
 #include <tlhelp32.h>
-#include "parser.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

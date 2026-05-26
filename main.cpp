@@ -1,37 +1,39 @@
-#define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
-#include <GLFW/glfw3native.h>
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
 #include "parser.h"
+#include "platform.h"
+
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#include <windows.h>
+#define MUTEX_NAME "ChatParser_SingleInstance"
 
 void ui_init(GLFWwindow *window);
 void ui_render(GLFWwindow *window);
 void ui_shutdown(void);
 bool ui_get_show_timestamps(void);
 
-#define MUTEX_NAME "ChatParser_SingleInstance"
-
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
-        (void)hInst; (void)hPrev; (void)cmd; (void)nShow;
+static int run(void) {
         HANDLE mutex = CreateMutexA(NULL, TRUE, MUTEX_NAME);
         if (!mutex) {
                 return 1;
         }
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-                MessageBoxA(NULL, "fivem-parser is already running.", "fivem-parser", MB_ICONINFORMATION);
+                platform_msgbox(nullptr, "fivem-parser", "fivem-parser is already running.", PLATFORM_MSG_INFO);
                 CloseHandle(mutex);
                 return 1;
         }
         if (!glfwInit()) {
-                MessageBoxA(NULL, "Failed to initialize GLFW.", "fivem-parser", MB_ICONERROR);
+                platform_msgbox(nullptr, "fivem-parser", "Failed to initialize GLFW.", PLATFORM_MSG_ERROR);
                 CloseHandle(mutex);
                 return 1;
         }
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+        const char *glsl_version = "#version 130";
         GLFWwindow *window = glfwCreateWindow(800, 500, "fivem-parser v1.1.3", NULL, NULL);
         if (!window) {
                 glfwTerminate();
@@ -48,7 +50,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
         io.IniFilename = NULL;
         ImGui::StyleColorsDark();
         ImGui_ImplGlfw_InitForOpenGL(window, true);
-        ImGui_ImplOpenGL3_Init("#version 130");
+        ImGui_ImplOpenGL3_Init(glsl_version);
         ui_init(window);
         while (!glfwWindowShouldClose(window)) {
                 glfwWaitEventsTimeout(0.5);
@@ -75,4 +77,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
         glfwTerminate();
         CloseHandle(mutex);
         return 0;
+}
+
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
+        (void)hInst; (void)hPrev; (void)cmd; (void)nShow;
+        return run();
 }

@@ -1,8 +1,5 @@
-#define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
-#include <GLFW/glfw3native.h>
 #include "imgui.h"
-#include <commdlg.h>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -13,6 +10,7 @@
 #include <algorithm>
 
 #include "parser.h"
+#include "platform.h"
 
 ImVec4 color_palette(int code) {
         switch (code) {
@@ -121,7 +119,7 @@ static bool s_find_need_scroll = false;
 static bool s_show_ts = true;
 static bool s_live_mode = false;
 static bool s_live_scroll = false;
-static char s_path[MAX_PATH * 2] = "";
+static char s_path[PARSER_PATH_MAX * 2] = "";
 
 static std::vector<float> s_line_heights;
 static float s_cache_avail_w = 0.0f;
@@ -346,44 +344,21 @@ static void delete_bulk(const std::vector<bool> &sel, bool is_filter) {
         rebuild_totals();
 }
 
-static void delete_chat_line(int idx) {
-        if (idx < 0 || idx >= (int)s_chat.size()) return;
-        s_chat.erase(s_chat.begin() + idx);
-        invalidate_height_cache();
-        for (int j = (int)s_flt_indices.size() - 1; j >= 0; j--) {
-                if (s_flt_indices[j] == idx)
-                        s_flt_indices.erase(s_flt_indices.begin() + j);
-                else if (s_flt_indices[j] > idx)
-                        s_flt_indices[j]--;
-        }
-        rebuild_totals();
-}
-
 static void do_save(GLFWwindow *w, const std::string &text, const char *default_name) {
         if (text.empty()) {
-                MessageBoxA(glfwGetWin32Window(w), "Nothing to save - parse a log first.", "Empty", MB_ICONINFORMATION);
+                platform_msgbox(w, "Empty", "Nothing to save - parse a log first.", PLATFORM_MSG_INFO);
                 return;
         }
-        OPENFILENAMEA ofn = {};
-        char fname[MAX_PATH];
-        strncpy(fname, default_name, MAX_PATH - 1);
-        fname[MAX_PATH - 1] = '\0';
-        ofn.lStructSize = sizeof(ofn);
-        ofn.hwndOwner = glfwGetWin32Window(w);
-        ofn.lpstrFilter = "Text Files (*.txt)\0*.txt\0All Files\0*.*\0";
-        ofn.lpstrFile = fname;
-        ofn.nMaxFile = MAX_PATH;
-        ofn.Flags = OFN_OVERWRITEPROMPT;
-        ofn.lpstrDefExt = "txt";
-        if (!GetSaveFileNameA(&ofn))
+        char fname[PARSER_PATH_MAX];
+        if (!platform_save_file_dialog(w, "Save As", default_name, "Text Files", "txt", fname, sizeof(fname)))
                 return;
         FILE *f = fopen(fname, "wb");
         if (f) {
                 fwrite(text.c_str(), 1, text.size(), f);
                 fclose(f);
-                MessageBoxA(glfwGetWin32Window(w), "Saved.", "Saved", MB_ICONINFORMATION);
+                platform_msgbox(w, "Saved", "Saved.", PLATFORM_MSG_INFO);
         } else {
-                MessageBoxA(glfwGetWin32Window(w), "Failed to save file.", "Error", MB_ICONERROR);
+                platform_msgbox(w, "Error", "Failed to save file.", PLATFORM_MSG_ERROR);
         }
 }
 
@@ -393,27 +368,19 @@ static void do_copy(GLFWwindow *w, const std::string &text) {
 }
 
 static void do_browse(GLFWwindow *w) {
-        OPENFILENAMEA ofn = {};
-        char fname[MAX_PATH] = "";
-        ofn.lStructSize = sizeof(ofn);
-        ofn.hwndOwner = glfwGetWin32Window(w);
-        ofn.lpstrFilter = "Log Files (*.log)\0*.log\0All Files\0*.*\0";
-        ofn.lpstrFile = fname;
-        ofn.nMaxFile = MAX_PATH;
-        ofn.Flags = OFN_FILEMUSTEXIST;
-        ofn.lpstrTitle = "Select Session";
-        if (GetOpenFileNameA(&ofn))
+        char fname[PARSER_PATH_MAX];
+        if (platform_open_file_dialog(w, "Select Session", "Log Files", "log", fname, sizeof(fname)))
                 snprintf(s_path, sizeof(s_path), "%s", fname);
 }
 
 static void do_parse_log(GLFWwindow *w) {
         if (!s_path[0]) {
-                MessageBoxA(glfwGetWin32Window(w), "Please select a log file first.", "Error", MB_ICONWARNING);
+                platform_msgbox(w, "Error", "Please select a log file first.", PLATFORM_MSG_WARN);
                 return;
         }
         FILE *f = fopen(s_path, "r");
         if (!f) {
-                MessageBoxA(glfwGetWin32Window(w), "Failed to open log file.", "Error", MB_ICONERROR);
+                platform_msgbox(w, "Error", "Failed to open log file.", PLATFORM_MSG_ERROR);
                 return;
         }
         if (s_live_mode) {
@@ -471,28 +438,21 @@ static void do_parse_log(GLFWwindow *w) {
         fclose(f);
         invalidate_height_cache();
         if (s_chat.empty())
-                MessageBoxA(glfwGetWin32Window(w), "No [fivem-parser] messages found in log.", "Empty", MB_ICONINFORMATION);
+                platform_msgbox(w, "Empty", "No [fivem-parser] messages found in log.", PLATFORM_MSG_INFO);
 }
 
 static void do_export_png(GLFWwindow *w, const std::vector<ChatLine> &lines) {
         if (lines.empty()) {
-                MessageBoxA(glfwGetWin32Window(w), "Nothing to export - parse a log first.", "Empty", MB_ICONINFORMATION);
+                platform_msgbox(w, "Empty", "Nothing to export - parse a log first.", PLATFORM_MSG_INFO);
                 return;
         }
-        OPENFILENAMEA ofn = {};
-        char fname[MAX_PATH] = "chat_log.png";
-        ofn.lStructSize = sizeof(ofn);
-        ofn.hwndOwner = glfwGetWin32Window(w);
-        ofn.lpstrFilter = "PNG Image (*.png)\0*.png\0All Files\0*.*\0";
-        ofn.lpstrFile = fname;
-        ofn.nMaxFile = MAX_PATH;
-        ofn.Flags = OFN_OVERWRITEPROMPT;
-        ofn.lpstrDefExt = "png";
-        if (!GetSaveFileNameA(&ofn)) return;
+        char fname[PARSER_PATH_MAX];
+        if (!platform_save_file_dialog(w, "Export PNG", "chat_log.png", "PNG Image", "png", fname, sizeof(fname)))
+                return;
         if (export_chat_png(fname, lines, g_config.wrap_width, g_config.png_scale, s_png_bg[0], s_png_bg[1], s_png_bg[2], s_png_bg[3])) {
-                MessageBoxA(glfwGetWin32Window(w), "PNG exported successfully.", "Exported", MB_ICONINFORMATION);
+                platform_msgbox(w, "Exported", "PNG exported successfully.", PLATFORM_MSG_INFO);
         } else {
-                MessageBoxA(glfwGetWin32Window(w), "Failed to export PNG.\n\nArial font was not found on this system.", "Error", MB_ICONERROR);
+                platform_msgbox(w, "Error", "Failed to export PNG.\n\nArial font was not found on this system.", PLATFORM_MSG_ERROR);
         }
 }
 
@@ -519,10 +479,10 @@ void ui_render(GLFWwindow *w) {
                 ScannedMsg msgs[1];
                 int n = scanner_poll(msgs, 1);
                 if (n > 0) {
-                        SYSTEMTIME st;
-                        GetLocalTime(&st);
+                        int h, m, s;
+                        platform_local_time_hms(&h, &m, &s);
                         char ts[16];
-                        snprintf(ts, sizeof(ts), "[%02d:%02d:%02d]", st.wHour, st.wMinute, st.wSecond);
+                        snprintf(ts, sizeof(ts), "[%02d:%02d:%02d]", h, m, s);
                         for (int i = 0; i < n; i++) {
                                 ChatLine cl;
                                 cl.timestamp = ts;
@@ -764,10 +724,10 @@ void ui_render(GLFWwindow *w) {
                                 ScannedMsg drain[64];
                                 int dn;
                                 while ((dn = scanner_poll(drain, 64)) > 0) {
-                                        SYSTEMTIME st;
-                                        GetLocalTime(&st);
+                                        int h, m, s;
+                                        platform_local_time_hms(&h, &m, &s);
                                         char ts[16];
-                                        snprintf(ts, sizeof(ts), "[%02d:%02d:%02d]", st.wHour, st.wMinute, st.wSecond);
+                                        snprintf(ts, sizeof(ts), "[%02d:%02d:%02d]", h, m, s);
                                         for (int di = 0; di < dn; di++) {
                                                 ChatLine cl;
                                                 cl.timestamp = ts;
@@ -795,7 +755,7 @@ void ui_render(GLFWwindow *w) {
                                 if (scanner_start())
                                         s_live_mode = true;
                                 else
-                                        MessageBoxA(glfwGetWin32Window(w), "Failed to start scanner.", "Error", MB_ICONERROR);
+                                        platform_msgbox(w, "Error", "Failed to start scanner.", PLATFORM_MSG_ERROR);
                         }
                 }
                 ImGui::SameLine();
