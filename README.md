@@ -10,10 +10,11 @@ https://github.com/user-attachments/assets/b9257680-8563-4eb3-851c-ae655ef83da2
 
 ## Building
 
-Requires [xmake](https://xmake.io/) and a mingw-w64 toolchain.
+Requires [premake](https://premake.github.io/) and a mingw-w64 toolchain.
 
 ```bash
-xmake
+premake5 gmake
+make -C build config=release CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ AR=x86_64-w64-mingw32-ar
 ```
 
 ## License
